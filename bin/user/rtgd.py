@@ -380,6 +380,7 @@ import syslog
 import threading
 import time
 import urllib2
+from operator import itemgetter
 
 # weeWX imports
 import weedb
@@ -388,7 +389,7 @@ import weeutil.weeutil
 import weewx.units
 import weewx.wxformulas
 from weewx.engine import StdService
-from weewx.units import ValueTuple, convert, getStandardUnitType
+from weewx.units import ValueTuple, convert, getStandardUnitType, ListOfDicts
 from weeutil.weeutil import to_bool, to_int, startOfDay
 
 # version number of this script
@@ -417,6 +418,16 @@ UNITS_CLOUD = {'foot':  'ft',
 GROUP_DIST = {'mile_per_hour':      'mile',
               'meter_per_second':   'km',
               'km_per_hour':        'km'}
+# the obs that we will buffer
+MANIFEST = ['outTemp', 'barometer', 'outHumidity', 'rain', 'rainRate',
+            'humidex', 'windchill', 'heatindex', 'windSpeed', 'inTemp',
+            'appTemp', 'dewpoint', 'windDir', 'UV', 'radiation', 'wind',
+            'windGust', 'windGustDir']
+
+# obs for which we need a history
+HIST_MANIFEST = ['windSpeed', 'windDir', 'windGust', 'wind']
+
+MAX_AGE = 600
 
 # Define station lost contact checks for supported stations. Note that at
 # present only Vantage and FOUSB stations lost contact reporting is supported.
@@ -796,7 +807,7 @@ class RealtimeGaugeDataThread(threading.Thread):
 
         # initialise last wind directions for use when respective direction is
         # None. We need latest and average
-        self.last_latest_dir = 0
+        self.last_dir = 0
         self.last_average_dir = 0
 
         # Are we updating windrun using archive data only or archive and loop
@@ -812,8 +823,8 @@ class RealtimeGaugeDataThread(threading.Thread):
         self.apptemp_binding = rtgd_config_dict.get('apptemp_binding',
                                                     'wx_binding')
 
-        # create a RtgdBuffer object to hold our loop 'stats'
-        self.buffer = RtgdBuffer()
+#        # create a Buffer object to hold our loop 'stats'
+#        self.buffer = Buffer(MANIFEST)
 
         # Set our lost contact flag. Assume we start off with contact
         self.lost_contact_flag = False
@@ -858,141 +869,160 @@ class RealtimeGaugeDataThread(threading.Thread):
         # running in a thread we need to wait until the thread is actually
         # running before getting db managers
 
-        # get a db manager
-        self.db_manager = weewx.manager.open_manager(self.manager_dict)
-        # get a db manager for appTemp
-        self.apptemp_manager = weewx.manager.open_manager_with_config(self.config_dict,
-                                                                      self.apptemp_binding)
-        # get a Zambretti forecast objects
-        self.forecast = ZambrettiForecast(self.config_dict)
-        logdbg("rtgdthread",
-               "Zambretti is installed: %s" % self.forecast.is_installed())
-        # initialise our day stats
-        self.day_stats = self.db_manager._get_day_summary(time.time())
-        # initialise our day stats from our appTemp source
-        self.apptemp_day_stats = self.apptemp_manager._get_day_summary(time.time())
-        # get a windrose to start with since it is only on receipt of an
-        # archive record
-        self.rose = calc_windrose(int(time.time()),
-                                  self.db_manager,
-                                  self.wr_period,
-                                  self.wr_points)
-        if weewx.debug == 2:
-            logdbg("rtgdthread", "windrose data calculated")
-        elif weewx.debug >= 3:
-            logdbg("rtgdthread", "windrose data calculated: %s" % (self.rose,))
-        # setup our loop cache and set some starting wind values
-        _ts = self.db_manager.lastGoodStamp()
-        if _ts is not None:
-            _rec = self.db_manager.getRecord(_ts)
-        else:
-            _rec = {'usUnits': None}
-        # get a CachedPacket object as our loop packet cache and prime it with
-        # values from the last good archive record if available
-        self.packet_cache = CachedPacket(_rec)
-        logdbg2("rtgdthread", "loop packet cache initialised")
-        # save the windSpeed value to use as our archive period average, this
-        # needs to be a ValueTuple since we may need to convert units
-        if 'windSpeed' in _rec:
-            self.windSpeedAvg_vt = weewx.units.as_value_tuple(_rec, 'windSpeed')
-        # save the windDir value to use as our archive period average
-        if 'windDir' in _rec:
-            self.windDirAvg = _rec['windDir']
+        try:
+            # get a db manager
+            self.db_manager = weewx.manager.open_manager(self.manager_dict)
+            # get a db manager for appTemp
+            self.apptemp_manager = weewx.manager.open_manager_with_config(self.config_dict,
+                                                                          self.apptemp_binding)
+            # get a Zambretti forecast objects
+            self.forecast = ZambrettiForecast(self.config_dict)
+            logdbg("rtgdthread",
+                   "Zambretti is installed: %s" % self.forecast.is_installed())
+            # initialise our day stats
+            self.day_stats = self.db_manager._get_day_summary(time.time())
+            # set the unit system for our day stats
+            self.day_stats.unit_system = self.db_manager.std_unit_system
+            # initialise our day stats from our appTemp source
+            self.apptemp_day_stats = self.apptemp_manager._get_day_summary(time.time())
+            # get a Buffer object
+            self.buffer = Buffer(MANIFEST,
+                                 day_stats=self.day_stats,
+                                 additional_day_stats=self.apptemp_day_stats)
 
-        # now run a continuous loop, waiting for records to appear in the rtgd
-        # queue then processing them.
-        while True:
-            # inner loop to monitor the queues
+            # get a windrose to start with since it is only on receipt of an
+            # archive record
+            self.rose = calc_windrose(int(time.time()),
+                                      self.db_manager,
+                                      self.wr_period,
+                                      self.wr_points)
+            if weewx.debug == 2:
+                logdbg("rtgdthread", "windrose data calculated")
+            elif weewx.debug >= 3:
+                logdbg("rtgdthread", "windrose data calculated: %s" % (self.rose,))
+            # setup our loop cache and set some starting wind values
+            _ts = self.db_manager.lastGoodStamp()
+            if _ts is not None:
+                _rec = self.db_manager.getRecord(_ts)
+            else:
+                _rec = {'usUnits': None}
+            # get a CachedPacket object as our loop packet cache and prime it with
+            # values from the last good archive record if available
+            self.packet_cache = CachedPacket(_rec)
+            logdbg2("rtgdthread", "loop packet cache initialised")
+            # save the windSpeed value to use as our archive period average, this
+            # needs to be a ValueTuple since we may need to convert units
+            if 'windSpeed' in _rec:
+                self.windSpeedAvg_vt = weewx.units.as_value_tuple(_rec, 'windSpeed')
+            # save the windDir value to use as our archive period average
+            if 'windDir' in _rec:
+                self.windDirAvg = _rec['windDir']
+
+            # now run a continuous loop, waiting for records to appear in the rtgd
+            # queue then processing them.
             while True:
-                # If we have a result queue check to see if we have received
-                # any forecast data. Use get_nowait() so we don't block the
-                # rtgd control queue. Wrap in a try..except to catch the error
-                # if there is nothing in the queue.
-                if self.result_queue:
+                # inner loop to monitor the queues
+                while True:
+                    # If we have a result queue check to see if we have received
+                    # any forecast data. Use get_nowait() so we don't block the
+                    # rtgd control queue. Wrap in a try..except to catch the error
+                    # if there is nothing in the queue.
+                    if self.result_queue:
+                        try:
+                            # use nowait() so we don't block
+                            _package = self.result_queue.get_nowait()
+                        except Queue.Empty:
+                            # nothing in the queue so continue
+                            pass
+                        else:
+                            # we did get something in the queue but was it a
+                            # 'forecast' package
+                            if isinstance(_package, dict):
+                                if 'type' in _package and _package['type'] == 'forecast':
+                                    # we have forecast text so log and save it
+                                    logdbg2("rtgdthread",
+                                            "received forecast text: %s" % _package['payload'])
+                                    self.forecast_text = _package['payload']
+                    # now deal with the control queue
                     try:
-                        # use nowait() so we don't block
-                        _package = self.result_queue.get_nowait()
+                        _package = self.control_queue.get_nowait()
                     except Queue.Empty:
                         # nothing in the queue so continue
                         pass
                     else:
-                        # we did get something in the queue but was it a
-                        # 'forecast' package
-                        if isinstance(_package, dict):
-                            if 'type' in _package and _package['type'] == 'forecast':
-                                # we have forecast text so log and save it
-                                logdbg2("rtgdthread",
-                                        "received forecast text: %s" % _package['payload'])
-                                self.forecast_text = _package['payload']
-                # now deal with the control queue
-                try:
-                    _package = self.control_queue.get_nowait()
-                except Queue.Empty:
-                    # nothing in the queue so continue
-                    pass
-                else:
-                    # a None record is our signal to exit
-                    if _package is None:
-                        return
-                    elif _package['type'] == 'archive':
-                        if weewx.debug == 2:
-                            logdbg("rtgdthread",
-                                   "received archive record (%s)" % _package['payload']['dateTime'])
-                        elif weewx.debug >= 3:
-                            logdbg("rtgdthread",
-                                   "received archive record: %s" % _package['payload'])
-                        self.new_archive_record(_package['payload'])
-                        self.rose = calc_windrose(_package['payload']['dateTime'],
-                                                  self.db_manager,
-                                                  self.wr_period,
-                                                  self.wr_points)
-                        if weewx.debug == 2:
-                            logdbg("rtgdthread", "windrose data calculated")
-                        elif weewx.debug >= 3:
-                            logdbg("rtgdthread",
-                                   "windrose data calculated: %s" % (self.rose,))
-                        continue
-                    elif _package['type'] == 'event':
-                        if _package['payload'] == weewx.END_ARCHIVE_PERIOD:
-                            logdbg2("rtgdthread",
-                                    "received event - END_ARCHIVE_PERIOD")
-                            self.end_archive_period()
-                        continue
-                    elif _package['type'] == 'stats':
-                        if weewx.debug == 2:
-                            logdbg("rtgdthread",
-                                   "received stats package")
-                        elif weewx.debug >= 3:
-                            logdbg("rtgdthread",
-                                   "received stats package: %s" % _package['payload'])
-                        self.process_stats(_package['payload'])
-                        continue
-                    elif _package['type'] == 'loop':
-                        # we now have a packet to process, wrap in a
-                        # try..except so we can catch any errors
-                        try:
+                        # a None record is our signal to exit
+                        if _package is None:
+                            return
+                        elif _package['type'] == 'archive':
                             if weewx.debug == 2:
                                 logdbg("rtgdthread",
-                                       "received loop packet (%s)" % _package['payload']['dateTime'])
+                                       "received archive record (%s)" % _package['payload']['dateTime'])
                             elif weewx.debug >= 3:
                                 logdbg("rtgdthread",
-                                       "received loop packet: %s" % _package['payload'])
-                            self.process_packet(_package['payload'])
+                                       "received archive record: %s" % _package['payload'])
+                            self.new_archive_record(_package['payload'])
+                            self.rose = calc_windrose(_package['payload']['dateTime'],
+                                                      self.db_manager,
+                                                      self.wr_period,
+                                                      self.wr_points)
+                            if weewx.debug == 2:
+                                logdbg("rtgdthread", "windrose data calculated")
+                            elif weewx.debug >= 3:
+                                logdbg("rtgdthread",
+                                       "windrose data calculated: %s" % (self.rose,))
                             continue
-                        except Exception, e:
-                            # Some unknown exception occurred. This is probably
-                            # a serious problem. Exit.
-                            logcrit("rtgdthread",
-                                    "Unexpected exception of type %s" % (type(e), ))
-                            weeutil.weeutil.log_traceback('*** ',
-                                                          syslog.LOG_DEBUG)
-                            logcrit("rtgdthread",
-                                    "Thread exiting. Reason: %s" % (e, ))
-                            return
-                # if packets have backed up in the control queue, trim it until
-                # it's no bigger than the max allowed backlog
-                while self.control_queue.qsize() > 5:
-                    self.control_queue.get()
+                        elif _package['type'] == 'event':
+### FIX ME - do we need this event?
+                            if _package['payload'] == weewx.END_ARCHIVE_PERIOD:
+                                logdbg2("rtgdthread",
+                                        "received event - END_ARCHIVE_PERIOD")
+                                # self.end_archive_period()
+                            continue
+                        elif _package['type'] == 'stats':
+                            if weewx.debug == 2:
+                                logdbg("rtgdthread",
+                                       "received stats package")
+                            elif weewx.debug >= 3:
+                                logdbg("rtgdthread",
+                                       "received stats package: %s" % _package['payload'])
+                            self.process_stats(_package['payload'])
+                            continue
+                        elif _package['type'] == 'loop':
+                            # we now have a packet to process, wrap in a
+                            # try..except so we can catch any errors
+                            try:
+                                if weewx.debug == 2:
+                                    logdbg("rtgdthread",
+                                           "received loop packet (%s)" % _package['payload']['dateTime'])
+                                elif weewx.debug >= 3:
+                                    logdbg("rtgdthread",
+                                           "received loop packet: %s" % _package['payload'])
+                                self.process_packet(_package['payload'])
+                                continue
+                            except Exception, e:
+                                # Some unknown exception occurred. This is probably
+                                # a serious problem. Exit.
+                                logcrit("rtgdthread",
+                                        "Unexpected exception of type %s" % (type(e), ))
+                                weeutil.weeutil.log_traceback('*** ',
+                                                              syslog.LOG_DEBUG)
+                                logcrit("rtgdthread",
+                                        "Thread exiting. Reason: %s" % (e, ))
+                                return
+                    # if packets have backed up in the control queue, trim it until
+                    # it's no bigger than the max allowed backlog
+                    while self.control_queue.qsize() > 5:
+                        self.control_queue.get()
+        except Exception, e:
+            # Some unknown exception occurred. This is probably
+            # a serious problem. Exit.
+            logcrit("rtgdthread run",
+                    "Unexpected exception of type %s" % (type(e), ))
+            weeutil.weeutil.log_traceback('*** ',
+                                          syslog.LOG_DEBUG)
+            logcrit("rtgdthread run",
+                    "Thread exiting. Reason: %s" % (e, ))
+            return
 
     def process_packet(self, packet):
         """Process incoming loop packets and generate gauge-data.txt.
@@ -1003,17 +1033,26 @@ class RealtimeGaugeDataThread(threading.Thread):
 
         # get time for debug timing
         t1 = time.time()
+        # convert our incoming packet
+        loginf("rtgdthread", "1")
+        loginf("rtgdthread", "packet=%s" % (packet,))
+        loginf("rtgdthread", "self.day_stats.unit_system=%s" % (self.day_stats.unit_system,))
+        _conv_packet = weewx.units.to_std_system(packet,
+                                                 self.day_stats.unit_system)
         # update the packet cache with this packet
-        self.packet_cache.update(packet, packet['dateTime'])
-        # do those things that must be done with every loop packet
-        # ie update our lows and highs and our 5 and 10 min wind lists
-        self.buffer.setLowsAndHighs(packet)
+        loginf("rtgdthread", "2")
+        self.packet_cache.update(_conv_packet, _conv_packet['dateTime'])
+        # update the buffer with the converted packet
+        loginf("rtgdthread", "3")
+        self.buffer.add_packet(_conv_packet)
+
         # generate if we have no minimum interval setting or if minimum
         # interval seconds have elapsed since our last generation
+        loginf("rtgdthread", "4")
         if self.min_interval is None or (self.last_write + float(self.min_interval)) < time.time():
             try:
                 # get a cached packet
-                cached_packet = self.packet_cache.get_packet(packet['dateTime'],
+                cached_packet = self.packet_cache.get_packet(_conv_packet['dateTime'],
                                                              self.max_cache_age)
                 if weewx.debug == 2:
                     logdbg("rtgdthread",
@@ -1035,14 +1074,15 @@ class RealtimeGaugeDataThread(threading.Thread):
                     # post the data
                     self.post_data(data)
                 # log the generation
-                logdbg2("rtgdthread",
-                        "gauge-data.txt (%s) generated in %.5f seconds" % (cached_packet['dateTime'],
-                                                                           (self.last_write-t1)))
+### FIX ME - revert to logdbg2
+                loginf("rtgdthread",
+                       "gauge-data.txt (%s) generated in %.5f seconds" % (cached_packet['dateTime'],
+                                                                          (self.last_write-t1)))
             except Exception, e:
                 weeutil.weeutil.log_traceback('rtgdthread: **** ')
         else:
             # we skipped this packet so log it
-            logdbg2("rtgdthread", "packet (%s) skipped" % packet['dateTime'])
+            logdbg2("rtgdthread", "packet (%s) skipped" % _conv_packet['dateTime'])
 
     def process_stats(self, package):
         """Process a stats package.
@@ -1185,10 +1225,9 @@ class RealtimeGaugeDataThread(threading.Thread):
             Dictionary of gauge-data.txt data elements.
         """
 
-        packet_d = dict(packet)
-        ts = packet_d['dateTime']
-        if self.packet_units is None or self.packet_units != packet_d['usUnits']:
-            self.packet_units = packet_d['usUnits']
+        ts = packet['dateTime']
+        if self.packet_units is None or self.packet_units != packet['usUnits']:
+            self.packet_units = packet['usUnits']
             (self.p_temp_type, self.p_temp_group) = getStandardUnitType(self.packet_units,
                                                                         'outTemp')
             (self.p_wind_type, self.p_wind_group) = getStandardUnitType(self.packet_units,
@@ -1222,7 +1261,7 @@ class RealtimeGaugeDataThread(threading.Thread):
         # cloudbaseunit - cloud base units - m, ft
         data['cloudbaseunit'] = UNITS_CLOUD[self.alt_group]
         # temp - outside temperature
-        temp_vt = ValueTuple(packet_d['outTemp'],
+        temp_vt = ValueTuple(packet['outTemp'],
                              self.p_temp_type,
                              self.p_temp_group)
         temp = convert(temp_vt, self.temp_group).value
@@ -1230,34 +1269,24 @@ class RealtimeGaugeDataThread(threading.Thread):
                                                      self.temp_group).value
         data['temp'] = self.temp_format % temp
         # tempTL - today's low temperature
-        tempTL_vt = ValueTuple(self.day_stats['outTemp'].min,
+        tempTL_vt = ValueTuple(self.buffer['outTemp'].min,
                                self.p_temp_type,
                                self.p_temp_group)
         tempTL = convert(tempTL_vt, self.temp_group).value
-        tempTL_loop_vt = ValueTuple(self.buffer.tempL_loop[0],
-                                    self.p_temp_type,
-                                    self.p_temp_group)
-        tempL_loop = convert(tempTL_loop_vt, self.temp_group).value
-        tempTL = weeutil.weeutil.min_with_none([tempL_loop, tempTL])
         tempTL = tempTL if tempTL is not None else temp
         data['tempTL'] = self.temp_format % tempTL
         # tempTH - today's high temperature
-        tempTH_vt = ValueTuple(self.day_stats['outTemp'].max,
+        tempTH_vt = ValueTuple(self.buffer['outTemp'].max,
                                self.p_temp_type,
                                self.p_temp_group)
         tempTH = convert(tempTH_vt, self.temp_group).value
-        tempTH_loop_vt = ValueTuple(self.buffer.tempH_loop[0],
-                                    self.p_temp_type,
-                                    self.p_temp_group)
-        tempH_loop = convert(tempTH_loop_vt, self.temp_group).value
-        tempTH = max(tempH_loop, tempTH)
         tempTH = tempTH if tempTH is not None else temp
         data['tempTH'] = self.temp_format % tempTH
         # TtempTL - time of today's low temp (hh:mm)
-        TtempTL = time.localtime(self.day_stats['outTemp'].mintime) if tempL_loop >= tempTL else time.localtime(self.buffer.tempL_loop[1])
+        TtempTL = time.localtime(self.buffer['outTemp'].mintime)
         data['TtempTL'] = time.strftime(self.time_format, TtempTL)
         # TtempTH - time of today's high temp (hh:mm)
-        TtempTH = time.localtime(self.day_stats['outTemp'].maxtime) if tempH_loop <= tempTH else time.localtime(self.buffer.tempH_loop[1])
+        TtempTH = time.localtime(self.buffer['outTemp'].maxtime)
         data['TtempTH'] = time.strftime(self.time_format, TtempTH)
         # temptrend - temperature trend value
         _temp_trend_val = calc_trend('outTemp', temp_vt, self.temp_group,
@@ -1265,38 +1294,38 @@ class RealtimeGaugeDataThread(threading.Thread):
         temp_trend = _temp_trend_val if _temp_trend_val is not None else 0.0
         data['temptrend'] = self.temp_format % temp_trend
         # intemp - inside temperature
-        intemp_vt = ValueTuple(packet_d['inTemp'],
+        intemp_vt = ValueTuple(packet['inTemp'],
                                self.p_temp_type,
                                self.p_temp_group)
         intemp = convert(intemp_vt, self.temp_group).value
-        intemp = intemp if intemp is not None else 0.0
+        intemp = intemp if intemp is not None else convert(ValueTuple(0.0, 'degree_C', 'group_temperature'),
+                                                           self.temp_group).value
         data['intemp'] = self.temp_format % intemp
         # hum - relative humidity
-        hum = packet_d['outHumidity'] if packet_d['outHumidity'] is not None else 0.0
+        hum = packet['outHumidity'] if packet['outHumidity'] is not None else 0.0
         data['hum'] = self.hum_format % hum
         # humTL - today's low relative humidity
-        humTL = weeutil.weeutil.min_with_none([self.buffer.humL_loop[0], 
-                                               self.day_stats['outHumidity'].min])
+        humTL = self.buffer['outHumidity'].min
         humTL = humTL if humTL is not None else hum
         data['humTL'] = self.hum_format % humTL
         # humTH - today's high relative humidity
-        humTH = max(self.buffer.humH_loop[0], self.day_stats['outHumidity'].max, 0.0)
+        humTH = self.buffer['outHumidity'].max
         humTH = humTH if humTH is not None else hum
         data['humTH'] = self.hum_format % humTH
         # ThumTL - time of today's low relative humidity (hh:mm)
-        ThumTL = time.localtime(self.day_stats['outHumidity'].mintime) if self.buffer.humL_loop[0] >= humTL else time.localtime(self.buffer.humL_loop[1])
+        ThumTL = time.localtime(self.buffer['outHumidity'].mintime)
         data['ThumTL'] = time.strftime(self.time_format, ThumTL)
         # ThumTH - time of today's high relative humidity (hh:mm)
-        ThumTH = time.localtime(self.day_stats['outHumidity'].maxtime) if self.buffer.humH_loop[0] <= humTH else time.localtime(self.buffer.humH_loop[1])
+        ThumTH = time.localtime(self.buffer['outHumidity'].maxtime)
         data['ThumTH'] = time.strftime(self.time_format, ThumTH)
         # inhum - inside humidity
-        if 'inHumidity' not in packet_d:
+        if 'inHumidity' not in packet:
             data['inhum'] = self.hum_format % 0.0
         else:
-            inhum = packet_d['inHumidity'] if packet_d['inHumidity'] is not None else 0.0
+            inhum = packet['inHumidity'] if packet['inHumidity'] is not None else 0.0
             data['inhum'] = self.hum_format % inhum
         # dew - dew point
-        dew_vt = ValueTuple(packet_d['dewpoint'],
+        dew_vt = ValueTuple(packet['dewpoint'],
                             self.p_temp_type,
                             self.p_temp_group)
         dew = convert(dew_vt, self.temp_group).value
@@ -1304,37 +1333,27 @@ class RealtimeGaugeDataThread(threading.Thread):
                                                   self.temp_group).value
         data['dew'] = self.temp_format % dew
         # dewpointTL - today's low dew point
-        dewpointTL_vt = ValueTuple(self.day_stats['dewpoint'].min,
+        dewpointTL_vt = ValueTuple(self.buffer['dewpoint'].min,
                                    self.p_temp_type,
                                    self.p_temp_group)
         dewpointTL = convert(dewpointTL_vt, self.temp_group).value
-        dewpointTL_loop_vt = ValueTuple(self.buffer.dewpointL_loop[0],
-                                        self.p_temp_type,
-                                        self.p_temp_group)
-        dewpointL_loop = convert(dewpointTL_loop_vt, self.temp_group).value
-        dewpointTL = weeutil.weeutil.min_with_none([dewpointL_loop, dewpointTL])
         dewpointTL = dewpointTL if dewpointTL is not None else dew
         data['dewpointTL'] = self.temp_format % dewpointTL
         # dewpointTH - today's high dew point
-        dewpointTH_vt = ValueTuple(self.day_stats['dewpoint'].max,
+        dewpointTH_vt = ValueTuple(self.buffer['dewpoint'].max,
                                    self.p_temp_type,
                                    self.p_temp_group)
         dewpointTH = convert(dewpointTH_vt, self.temp_group).value
-        dewpointTH_loop_vt = ValueTuple(self.buffer.dewpointH_loop[0],
-                                        self.p_temp_type,
-                                        self.p_temp_group)
-        dewpointH_loop = convert(dewpointTH_loop_vt, self.temp_group).value
-        dewpointTH = max(dewpointH_loop, dewpointTH)
         dewpointTH = dewpointTH if dewpointTH is not None else dew
         data['dewpointTH'] = self.temp_format % dewpointTH
         # TdewpointTL - time of today's low dew point (hh:mm)
-        TdewpointTL = time.localtime(self.day_stats['dewpoint'].mintime) if dewpointL_loop >= dewpointTL else time.localtime(self.buffer.dewpointL_loop[1])
+        TdewpointTL = time.localtime(self.buffer['dewpoint'].mintime)
         data['TdewpointTL'] = time.strftime(self.time_format, TdewpointTL)
         # TdewpointTH - time of today's high dew point (hh:mm)
-        TdewpointTH = time.localtime(self.day_stats['dewpoint'].maxtime) if dewpointH_loop <= dewpointTH else time.localtime(self.buffer.dewpointH_loop[1])
+        TdewpointTH = time.localtime(self.buffer['dewpoint'].maxtime)
         data['TdewpointTH'] = time.strftime(self.time_format, TdewpointTH)
         # wchill - wind chill
-        wchill_vt = ValueTuple(packet_d['windchill'],
+        wchill_vt = ValueTuple(packet['windchill'],
                                self.p_temp_type,
                                self.p_temp_group)
         wchill = convert(wchill_vt, self.temp_group).value
@@ -1342,22 +1361,17 @@ class RealtimeGaugeDataThread(threading.Thread):
                                                            self.temp_group).value
         data['wchill'] = self.temp_format % wchill
         # wchillTL - today's low wind chill
-        wchillTL_vt = ValueTuple(self.day_stats['windchill'].min,
+        wchillTL_vt = ValueTuple(self.buffer['windchill'].min,
                                  self.p_temp_type,
                                  self.p_temp_group)
         wchillTL = convert(wchillTL_vt, self.temp_group).value
-        wchillTL_loop_vt = ValueTuple(self.buffer.wchillL_loop[0],
-                                      self.p_temp_type,
-                                      self.p_temp_group)
-        wchillL_loop = convert(wchillTL_loop_vt, self.temp_group).value
-        wchillTL = weeutil.weeutil.min_with_none([wchillL_loop, wchillTL])
         wchillTL = wchillTL if wchillTL is not None else wchill
         data['wchillTL'] = self.temp_format % wchillTL
         # TwchillTL - time of today's low wind chill (hh:mm)
-        TwchillTL = time.localtime(self.day_stats['windchill'].mintime) if wchillL_loop >= wchillTL else time.localtime(self.buffer.wchillL_loop[1])
+        TwchillTL = time.localtime(self.buffer['windchill'].mintime)
         data['TwchillTL'] = time.strftime(self.time_format, TwchillTL)
         # heatindex - heat index
-        heatindex_vt = ValueTuple(packet_d['heatindex'],
+        heatindex_vt = ValueTuple(packet['heatindex'],
                                   self.p_temp_type,
                                   self.p_temp_group)
         heatindex = convert(heatindex_vt, self.temp_group).value
@@ -1365,39 +1379,36 @@ class RealtimeGaugeDataThread(threading.Thread):
                                                                     self.temp_group).value
         data['heatindex'] = self.temp_format % heatindex
         # heatindexTH - today's high heat index
-        heatindexTH_vt = ValueTuple(self.day_stats['heatindex'].max,
+        heatindexTH_vt = ValueTuple(self.buffer['heatindex'].max,
                                     self.p_temp_type,
                                     self.p_temp_group)
         heatindexTH = convert(heatindexTH_vt, self.temp_group).value
-        heatindexTH_loop_vt = ValueTuple(self.buffer.heatindexH_loop[0],
-                                         self.p_temp_type,
-                                         self.p_temp_group)
-        heatindexH_loop = convert(heatindexTH_loop_vt, self.temp_group).value
-        heatindexTH = max(heatindexH_loop, heatindexTH)
         heatindexTH = heatindexTH if heatindexTH is not None else heatindex
         data['heatindexTH'] = self.temp_format % heatindexTH
         # TheatindexTH - time of today's high heat index (hh:mm)
-        TheatindexTH = time.localtime(self.day_stats['heatindex'].maxtime) if heatindexH_loop >= heatindexTH else time.localtime(self.buffer.heatindexH_loop[1])
+        TheatindexTH = time.localtime(self.buffer['heatindex'].maxtime)
         data['TheatindexTH'] = time.strftime(self.time_format, TheatindexTH)
         # apptemp - apparent temperature
-        if 'appTemp' in packet_d:
+        if 'appTemp' in packet:
             # appTemp has been calculated for us so use it
-            apptemp_vt = ValueTuple(packet_d['appTemp'],
+            apptemp_vt = ValueTuple(packet['appTemp'],
                                     self.p_temp_type,
                                     self.p_temp_group)
         else:
             # apptemp not available so calculate it
-            # first get the arguments for the calculation
+            # first get the arguments for the calculation, if any of our
+            # pre-reqs are missing or None the calculated app temp will be None
             temp_C = convert(temp_vt, 'degree_C').value
-            windspeed_vt = ValueTuple(packet_d['windSpeed'],
+            windspeed_vt = ValueTuple(packet.get('windSpeed', None),
                                       self.p_wind_type,
                                       self.p_wind_group)
             windspeed_ms = convert(windspeed_vt, 'meter_per_second').value
             # now calculate it
             apptemp_C = weewx.wxformulas.apptempC(temp_C,
-                                                  packet_d['outHumidity'],
+                                                  packet.get('outHumidity', None),
                                                   windspeed_ms)
             apptemp_vt = ValueTuple(apptemp_C, 'degree_C', 'group_temperature')
+
         apptemp = convert(apptemp_vt, self.temp_group).value
         apptemp = apptemp if apptemp is not None else convert(ValueTuple(0.0, 'degree_C', 'group_temperature'),
                                                               self.temp_group).value
@@ -1406,28 +1417,20 @@ class RealtimeGaugeDataThread(threading.Thread):
         # apptempTH - today's high apparent temperature
         # TapptempTL - time of today's low apparent temperature (hh:mm)
         # TapptempTH - time of today's high apparent temperature (hh:mm)
-        if 'appTemp' in self.apptemp_day_stats:
+        if 'appTemp' in self.buffer:
             # we have day stats for appTemp
-            apptempTL_vt = ValueTuple(self.apptemp_day_stats['appTemp'].min,
+            apptempTL_vt = ValueTuple(self.buffer['appTemp'].min,
                                       self.p_temp_type,
                                       self.p_temp_group)
             apptempTL = convert(apptempTL_vt, self.temp_group).value
-            apptempTL_loop_vt = ValueTuple(self.buffer.apptempL_loop[0],
-                                           self.p_temp_type,
-                                           self.p_temp_group)
-            apptempL_loop = convert(apptempTL_loop_vt, self.temp_group).value
-            apptempTL = weeutil.weeutil.min_with_none([apptempL_loop, apptempTL])
-            apptempTH_vt = ValueTuple(self.apptemp_day_stats['appTemp'].max,
+            apptempTH_vt = ValueTuple(self.buffer['appTemp'].max,
                                       self.p_temp_type,
                                       self.p_temp_group)
             apptempTH = convert(apptempTH_vt, self.temp_group).value
-            apptempTH_loop_vt = ValueTuple(self.buffer.apptempH_loop[0],
-                                           self.p_temp_type,
-                                           self.p_temp_group)
-            apptempH_loop = convert(apptempTH_loop_vt, self.temp_group).value
-            apptempTH = max(apptempH_loop, apptempTH)
-            TapptempTL = time.localtime(self.apptemp_day_stats['appTemp'].mintime) if apptempL_loop >= apptempTL else time.localtime(self.buffer.apptempL_loop[1])
-            TapptempTH = time.localtime(self.apptemp_day_stats['appTemp'].maxtime) if apptempH_loop <= apptempTH else time.localtime(self.buffer.apptempH_loop[1])
+            apptempTH = apptempTH if apptempTH is not None else convert(ValueTuple(0.0, 'degree_C', 'group_temperature'),
+                                                                        self.temp_group).value
+            TapptempTL = time.localtime(self.buffer['appTemp'].mintime)
+            TapptempTH = time.localtime(self.buffer['appTemp'].maxtime)
         else:
             # There are no appTemp day stats. Normally we would return None but
             # the SteelSeries Gauges do not like None/null. Return the current
@@ -1447,25 +1450,25 @@ class RealtimeGaugeDataThread(threading.Thread):
         data['TapptempTL'] = time.strftime(self.time_format, TapptempTL)
         data['TapptempTH'] = time.strftime(self.time_format, TapptempTH)
         # humidex - humidex
-        if 'humidex' in packet_d:
+        if 'humidex' in packet:
             # humidex is in the packet so use it
-            humidex_vt = ValueTuple(packet_d['humidex'],
+            humidex_vt = ValueTuple(packet['humidex'],
                                     self.p_temp_type,
                                     self.p_temp_group)
             humidex = convert(humidex_vt, self.temp_group).value
-        else:   # No humidex in our loop packet so all we can do is calculate it.
+        else:
             # humidex is not in the packet so calculate it
             temp_C = convert(temp_vt, 'degree_C').value
             dewpoint_C = convert(dew_vt, 'degree_C').value
             humidex_C = weewx.wxformulas.humidexC(temp_C,
-                                                  packet_d['outHumidity'])
+                                                  packet.get('outHumidity', None))
             humidex_vt = ValueTuple(humidex_C, 'degree_C', 'group_temperature')
             humidex = convert(humidex_vt, self.temp_group).value
         humidex = humidex if humidex is not None else convert(ValueTuple(0.0, 'degree_C', 'group_temperature'),
                                                               self.temp_group).value
         data['humidex'] = self.temp_format % humidex
         # press - barometer
-        press_vt = ValueTuple(packet_d['barometer'],
+        press_vt = ValueTuple(packet['barometer'],
                               self.p_baro_type,
                               self.p_baro_group)
         press = convert(press_vt, self.pres_group).value
@@ -1475,31 +1478,22 @@ class RealtimeGaugeDataThread(threading.Thread):
         # pressTH - today's high barometer
         # TpressTL - time of today's low barometer (hh:mm)
         # TpressTH - time of today's high barometer (hh:mm)
-        if 'barometer' in self.day_stats:
-            pressTL_vt = ValueTuple(self.day_stats['barometer'].min,
+        if 'barometer' in self.buffer:
+            pressTL_vt = ValueTuple(self.buffer['barometer'].min,
                                     self.p_baro_type,
                                     self.p_baro_group)
             pressTL = convert(pressTL_vt, self.pres_group).value
-            pressL_loop_vt = ValueTuple(self.buffer.pressL_loop[0],
-                                        self.p_baro_type,
-                                        self.p_baro_group)
-            pressL_loop = convert(pressL_loop_vt, self.pres_group).value
-            pressTL = weeutil.weeutil.min_with_none([pressL_loop, pressTL])
             pressTL = pressTL if pressTL is not None else press
             data['pressTL'] = self.pres_format % pressTL
-            pressTH_vt = ValueTuple(self.day_stats['barometer'].max,
+            pressTH_vt = ValueTuple(self.buffer['barometer'].max,
                                     self.p_baro_type,
                                     self.p_baro_group)
             pressTH = convert(pressTH_vt, self.pres_group).value
-            pressH_loop_vt = ValueTuple(self.buffer.pressH_loop[0],
-                                        self.p_baro_type,
-                                        self.p_baro_group)
-            pressH_loop = convert(pressH_loop_vt, self.pres_group).value
-            pressTH = max(pressH_loop, pressTH, 0.0)
+            pressTH = pressTH if pressTH is not None else press
             data['pressTH'] = self.pres_format % pressTH
-            TpressTL = time.localtime(self.day_stats['barometer'].mintime) if pressL_loop >= pressTL else time.localtime(self.buffer.pressL_loop[1])
+            TpressTL = time.localtime(self.buffer['barometer'].mintime)
             data['TpressTL'] = time.strftime(self.time_format, TpressTL)
-            TpressTH = time.localtime(self.day_stats['barometer'].maxtime) if pressH_loop <= pressTH else time.localtime(self.buffer.pressH_loop[1])
+            TpressTH = time.localtime(self.buffer['barometer'].maxtime)
             data['TpressTH'] = time.strftime(self.time_format, TpressTH)
         else:
             data['pressTL'] = self.pres_format % 0.0
@@ -1530,38 +1524,37 @@ class RealtimeGaugeDataThread(threading.Thread):
         presstrendval = _p_trend_val if _p_trend_val is not None else 0.0
         data['presstrendval'] = self.pres_format % presstrendval
         # rfall - rain today
-        rainDay = self.day_stats['rain'].sum + self.buffer.rainsum
+        rainDay = self.buffer['rain'].sum
         rainT_vt = ValueTuple(rainDay, self.p_rain_type, self.p_rain_group)
         rainT = convert(rainT_vt, self.rain_group).value
         rainT = rainT if rainT is not None else 0.0
         data['rfall'] = self.rain_format % rainT
         # rrate - current rain rate (per hour)
-        if 'rainRate' in packet_d:
-            rrate_vt = ValueTuple(packet_d['rainRate'],
+        if 'rainRate' in packet:
+            rrate_vt = ValueTuple(packet['rainRate'],
                                   self.p_rainr_type,
                                   self.p_rainr_group)
-            rrate = convert(rrate_vt, self.rainrate_group).value if rrate_vt.value is not None else 0.0
+            rrate = convert(rrate_vt, self.rainrate_group).value
+            rrate = rrate if rrate is not None else 0.0
         else:
             rrate = 0.0
         data['rrate'] = self.rainrate_format % rrate
         # rrateTM - today's maximum rain rate (per hour)
-        if 'rainRate' in self.day_stats:
-            rrateTM_vt = ValueTuple(self.day_stats['rainRate'].max,
+        if 'rainRate' in self.buffer:
+            rrateTM_vt = ValueTuple(self.buffer['rainRate'].max,
                                     self.p_rainr_type,
                                     self.p_rainr_group)
             rrateTM = convert(rrateTM_vt, self.rainrate_group).value
         else:
             rrateTM = 0
-        rrateTM_loop_vt = ValueTuple(self.buffer.rrateH_loop[0], self.p_rainr_type, self.p_rainr_group)
-        rrateH_loop = convert(rrateTM_loop_vt, self.rainrate_group).value
-        rrateTM = max(rrateH_loop, rrateTM, rrate, 0.0)
+        rrateTM = rrateTM if rrateTM is not None else 0.0
         data['rrateTM'] = self.rainrate_format % rrateTM
         # TrrateTM - time of today's maximum rain rate (per hour)
-        if 'rainRate' not in self.day_stats:
-            data['TrrateTM'] = '00:00'
-        else:
-            TrrateTM = time.localtime(self.day_stats['rainRate'].maxtime) if rrateH_loop <= rrateTM else time.localtime(self.buffer.rrateH_loop[1])
+        if 'rainRate' in self.buffer:
+            TrrateTM = time.localtime(self.buffer['rainRate'].maxtime)
             data['TrrateTM'] = time.strftime(self.time_format, TrrateTM)
+        else:
+            data['TrrateTM'] = '00:00'
         # hourlyrainTH - Today's highest hourly rain
         # ###FIX ME - need to determine hourlyrainTH
         data['hourlyrainTH'] = "0.0"
@@ -1572,154 +1565,167 @@ class RealtimeGaugeDataThread(threading.Thread):
         # ###FIX ME - need to determine LastRainTipISO
         data['LastRainTipISO'] = "00:00"
         # wlatest - latest wind speed reading
-        wlatest_vt = ValueTuple(packet_d['windSpeed'],
+        wlatest_vt = ValueTuple(packet['windSpeed'],
                                 self.p_wind_type,
                                 self.p_wind_group)
-        wlatest = convert(wlatest_vt, self.wind_group).value if wlatest_vt.value is not None else 0.0
+        wlatest = convert(wlatest_vt, self.wind_group).value
+        wlatest = wlatest if wlatest is not None else 0.0
         data['wlatest'] = self.wind_format % wlatest
         # wspeed - wind speed (average)
         wspeed = convert(self.windSpeedAvg_vt, self.wind_group).value
         wspeed = wspeed if wspeed is not None else 0.0
         data['wspeed'] = self.wind_format % wspeed
         # windTM - today's high wind speed (average)
-        windTM_vt = ValueTuple(self.day_stats['windSpeed'].max,
+        windTM_vt = ValueTuple(self.buffer['windSpeed'].max,
                                self.p_wind_type,
                                self.p_wind_group)
         windTM = convert(windTM_vt, self.wind_group).value
-        windTM_loop_vt = ValueTuple(self.buffer.windM_loop[0],
-                                    self.p_wind_type,
-                                    self.p_wind_group)
-        windM_loop = convert(windTM_loop_vt, self.wind_group).value
-        windTM = max(windM_loop, windTM, 0.0)
+        windTM = windTM if windTM is not None else 0.0
         data['windTM'] = self.wind_format % windTM
+### VERIFY ME
         # wgust - 10 minute high gust
-        wgust = self.buffer.tenMinuteWindGust()
+        if 'windGust' in self.buffer:
+            wgust = self.buffer['windGust'].history_max(ts).value
+        elif 'windSpeed' in self.buffer:
+            wgust = self.buffer['windSpeed'].history_max(ts).value
+        else:
+            wgust = None
         wgust_vt = ValueTuple(wgust, self.p_wind_type, self.p_wind_group)
         wgust = convert(wgust_vt, self.wind_group).value
         wgust = wgust if wgust is not None else 0.0
         data['wgust'] = self.wind_format % wgust
         # wgustTM - today's high wind gust
-        wgustTM_vt = ValueTuple(self.day_stats['wind'].max,
+        wgustTM_vt = ValueTuple(self.buffer['wind'].max,
                                 self.p_wind_type,
                                 self.p_wind_group)
         wgustTM = convert(wgustTM_vt, self.wind_group).value
-        wgustM_loop_vt = ValueTuple(self.buffer.wgustM_loop[0],
-                                    self.p_wind_type,
-                                    self.p_wind_group)
-        wgustM_loop = convert(wgustM_loop_vt, self.wind_group).value
-        wgustTM = max(wgustM_loop, wgustTM, 0.0)
+        wgustTM = wgustTM if wgustTM is not None else 0.0
         data['wgustTM'] = self.wind_format % wgustTM
         # TwgustTM - time of today's high wind gust (hh:mm)
-        TwgustTM = time.localtime(self.day_stats['wind'].maxtime) if wgustM_loop <= wgustTM else time.localtime(self.buffer.wgustM_loop[2])
+        TwgustTM = time.localtime(self.buffer['wind'].maxtime)
         data['TwgustTM'] = time.strftime(self.time_format, TwgustTM)
+
+
+
         # bearing - wind bearing (degrees)
-        bearing = packet_d['windDir'] if packet_d['windDir'] is not None else self.last_latest_dir
-        self.last_latest_dir = bearing
+        bearing = packet['windDir']
+        bearing = bearing if bearing is not None else self.last_dir
+        # save this bearing to use next time if there is no windDir, this way
+        # our wind dir needle will always hsow the last non-None windDir rather
+        # than return to 0
+        self.last_dir = bearing
         data['bearing'] = self.dir_format % bearing
         # avgbearing - 10-minute average wind bearing (degrees)
-        avg_bearing = self.windDirAvg if self.windDirAvg is not None else self.last_average_dir
+        avg_bearing = self.windDirAvg
+        avg_bearing = avg_bearing if avg_bearing is not None else self.last_average_dir
+        # save this bearing to use next time if there is no average wind dir,
+        # this way our avg dir needle will always show the last non-None avg
+        # wind dir rather than return to 0
         self.last_average_dir = avg_bearing
         data['avgbearing'] = self.dir_format % avg_bearing
         # bearingTM - The wind bearing at the time of today's high gust
-        # As our self.day_stats is really a weeWX accumulator filled with the
+        # As our self.buffer is really a weeWX accumulator filled with the
         # relevant days stats we need to use .max_dir rather than .gustdir
         # to get the gust direction for the day.
-        bearingTM = self.day_stats['wind'].max_dir if self.day_stats['wind'].max_dir is not None else 0
-        bearingTM = self.buffer.wgustM_loop[1] if wgustTM == wgustM_loop else bearingTM
+        bearingTM = self.buffer['wind'].max_dir
+        bearingTM = bearingTM if bearingTM is not None else 0
         data['bearingTM'] = self.dir_format % bearingTM
-        # BearingRangeFrom10 - The 'lowest' bearing in the last 10 minutes
-        # (or as configured using AvgBearingMinutes in cumulus.ini), rounded
-        # down to nearest 10 degrees
-        if self.windDirAvg is not None:
-            try:
-                fromBearing = max((self.windDirAvg-d) if ((d-self.windDirAvg) < 0 < s) else None for x, y, s, d, t in self.buffer.wind_dir_list)
-            except (TypeError, ValueError):
-                fromBearing = None
-            BearingRangeFrom10 = self.windDirAvg - fromBearing if fromBearing is not None else 0.0
-            if BearingRangeFrom10 < 0:
-                BearingRangeFrom10 += 360
-            elif BearingRangeFrom10 > 360:
-                BearingRangeFrom10 -= 360
-        else:
-            BearingRangeFrom10 = 0.0
-        data['BearingRangeFrom10'] = self.dir_format % BearingRangeFrom10
-        # BearingRangeTo10 - The 'highest' bearing in the last 10 minutes
-        # (or as configured using AvgBearingMinutes in cumulus.ini), rounded
-        # up to the nearest 10 degrees
-        if self.windDirAvg is not None:
-            try:
-                toBearing = max((d-self.windDirAvg) if ((d-self.windDirAvg) > 0 and s > 0) else None for x, y, s, d, t in self.buffer.wind_dir_list)
-            except (TypeError, ValueError):
-                toBearing = None
-            BearingRangeTo10 = self.windDirAvg + toBearing if toBearing is not None else 0.0
-            if BearingRangeTo10 < 0:
-                BearingRangeTo10 += 360
-            elif BearingRangeTo10 > 360:
-                BearingRangeTo10 -= 360
-        else:
-            BearingRangeTo10 = 0.0
-        data['BearingRangeTo10'] = self.dir_format % BearingRangeTo10
+### FIX ME
+#        # BearingRangeFrom10 - The 'lowest' bearing in the last 10 minutes
+#        # (or as configured using AvgBearingMinutes in cumulus.ini), rounded
+#        # down to nearest 10 degrees
+#        if self.windDirAvg is not None:
+#            try:
+#                fromBearing = max((self.windDirAvg-d) if ((d-self.windDirAvg) < 0 < s) else None for x, y, s, d, t in self.buffer.wind_dir_list)
+#            except (TypeError, ValueError):
+#                fromBearing = None
+#            BearingRangeFrom10 = self.windDirAvg - fromBearing if fromBearing is not None else 0.0
+#            if BearingRangeFrom10 < 0:
+#                BearingRangeFrom10 += 360
+#            elif BearingRangeFrom10 > 360:
+#                BearingRangeFrom10 -= 360
+#        else:
+#            BearingRangeFrom10 = 0.0
+#        data['BearingRangeFrom10'] = self.dir_format % BearingRangeFrom10
+### FIX ME
+#        # BearingRangeTo10 - The 'highest' bearing in the last 10 minutes
+#        # (or as configured using AvgBearingMinutes in cumulus.ini), rounded
+#        # up to the nearest 10 degrees
+#        if self.windDirAvg is not None:
+#            try:
+#                toBearing = max((d-self.windDirAvg) if ((d-self.windDirAvg) > 0 and s > 0) else None for x, y, s, d, t in self.buffer.wind_dir_list)
+#            except (TypeError, ValueError):
+#                toBearing = None
+#            BearingRangeTo10 = self.windDirAvg + toBearing if toBearing is not None else 0.0
+#            if BearingRangeTo10 < 0:
+#                BearingRangeTo10 += 360
+#            elif BearingRangeTo10 > 360:
+#                BearingRangeTo10 -= 360
+#        else:
+#            BearingRangeTo10 = 0.0
+#        data['BearingRangeTo10'] = self.dir_format % BearingRangeTo10
         # domwinddir - Today's dominant wind direction as compass point
-        deg = 90.0 - math.degrees(math.atan2(self.day_stats['wind'].ysum,
-                                  self.day_stats['wind'].xsum))
+        deg = 90.0 - math.degrees(math.atan2(self.buffer['wind'].ysum,
+                                  self.buffer['wind'].xsum))
         dom_dir = deg if deg >= 0 else deg + 360.0
         data['domwinddir'] = degreeToCompass(dom_dir)
         # WindRoseData -
         data['WindRoseData'] = self.rose
-        # windrun - wind run (today)
-        last_ts = self.db_manager.lastGoodStamp()
-        try:
-            wind_sum_vt = ValueTuple(self.day_stats['wind'].sum,
-                                     self.p_wind_type,
-                                     self.p_wind_group)
-            windrun_day_average = (last_ts - startOfDay(ts))/3600.0 * convert(wind_sum_vt,
-                                                                              self.wind_group).value/self.day_stats['wind'].count
-        except (ValueError, TypeError, ZeroDivisionError):
-            windrun_day_average = 0.0
-        if self.windrun_loop:   # is loop/realtime estimate
-            loop_hours = (ts - last_ts)/3600.0
-            try:
-                windrun = windrun_day_average + loop_hours * convert((self.buffer.windsum,
-                                                                      self.p_wind_type,
-                                                                      self.p_wind_group),
-                                                                     self.wind_group).value/self.buffer.windcount
-            except (ValueError, TypeError):
-                windrun = windrun_day_average
-        else:
-            windrun = windrun_day_average
-        data['windrun'] = self.dist_format % windrun
+### FIX ME
+#        # windrun - wind run (today)
+#        last_ts = self.db_manager.lastGoodStamp()
+#        try:
+#            wind_sum_vt = ValueTuple(self.buffer['wind'].sum,
+#                                     self.p_wind_type,
+#                                     self.p_wind_group)
+#            windrun_day_average = (last_ts - startOfDay(ts))/3600.0 * convert(wind_sum_vt,
+#                                                                              self.wind_group).value/self.buffer['wind'].count
+#        except (ValueError, TypeError, ZeroDivisionError):
+#            windrun_day_average = 0.0
+#        if self.windrun_loop:   # is loop/realtime estimate
+#            loop_hours = (ts - last_ts)/3600.0
+#            try:
+#                windrun = windrun_day_average + loop_hours * convert((self.buffer.windsum,
+#                                                                      self.p_wind_type,
+#                                                                      self.p_wind_group),
+#                                                                     self.wind_group).value/self.buffer.windcount
+#            except (ValueError, TypeError):
+#                windrun = windrun_day_average
+#        else:
+#            windrun = windrun_day_average
+#        data['windrun'] = self.dist_format % windrun
         # Tbeaufort - wind speed (Beaufort)
-        if packet_d['windSpeed'] is not None:
+        if packet['windSpeed'] is not None:
             data['Tbeaufort'] = str(weewx.wxformulas.beaufort(convert(wlatest_vt,
                                                                       'knot').value))
         else:
             data['Tbeaufort'] = "0"
         # UV - UV index
-        if 'UV' not in packet_d:
+        if 'UV' not in packet:
             UV = 0.0
         else:
-            UV = packet_d['UV'] if packet_d['UV'] is not None else 0.0
+            UV = packet['UV'] if packet['UV'] is not None else 0.0
         data['UV'] = self.uv_format % UV
         # UVTH - today's high UV index
-        if 'UV' not in self.day_stats:
+        if 'UV' not in self.buffer:
             UVTH = UV
         else:
-            UVTH = self.day_stats['UV'].max
-        UVTH = max(self.buffer.UVH_loop[0], UVTH, UV, 0.0)
+            UVTH = self.buffer['UV'].max
+        UVTH = UVTH if UVTH is not None else 0.0
         data['UVTH'] = self.uv_format % UVTH
         # SolarRad - solar radiation W/m2
-        if 'radiation' not in packet_d:
+        if 'radiation' not in packet:
             SolarRad = 0.0
         else:
-            SolarRad = packet_d['radiation']
+            SolarRad = packet['radiation']
         SolarRad = SolarRad if SolarRad is not None else 0.0
         data['SolarRad'] = self.rad_format % SolarRad
         # SolarTM - today's maximum solar radiation W/m2
-        if 'radiation' not in self.day_stats:
+        if 'radiation' not in self.buffer:
             SolarTM = 0.0
         else:
-            SolarTM = self.day_stats['radiation'].max
-        SolarTM = max(self.buffer.SolarH_loop[0], SolarTM, SolarRad, 0.0)
+            SolarTM = self.buffer['radiation'].max
+        SolarTM = SolarTM if SolarTM is not None else 0.0
         data['SolarTM'] = self.rad_format % SolarTM
         # CurrentSolarMax - Current theoretical maximum solar radiation
         if self.solar_algorithm == 'Bras':
@@ -1736,13 +1742,13 @@ class RealtimeGaugeDataThread(threading.Thread):
                                                            self.atc)
         curr_solar_max = curr_solar_max if curr_solar_max is not None else 0.0
         data['CurrentSolarMax'] = self.rad_format % curr_solar_max
-        if 'cloudbase' in packet_d:
-            cb = packet_d['cloudbase']
+        if 'cloudbase' in packet:
+            cb = packet['cloudbase']
             cb_vt = ValueTuple(cb, self.p_alt_type, self.p_alt_group)
         else:
             temp_C = convert(temp_vt, 'degree_C').value
             cb = weewx.wxformulas.cloudbase_Metric(temp_C,
-                                                   packet_d['outHumidity'],
+                                                   packet['outHumidity'],
                                                    self.altitude_m)
             cb_vt = ValueTuple(cb, 'meter', self.p_alt_group)
         cloudbase = convert(cb_vt, self.alt_group).value
@@ -1780,19 +1786,250 @@ class RealtimeGaugeDataThread(threading.Thread):
         self.day_stats = self.db_manager._get_day_summary(record['dateTime'])
         self.apptemp_day_stats = self.apptemp_manager._get_day_summary(record['dateTime'])
 
-    def end_archive_period(self):
-        """Control processing at the end of each archive period."""
+#    def end_archive_period(self):
+#        """Control processing at the end of each archive period."""
+#
+#        # Reset our loop stats.
+#        self.buffer.reset_loop_stats()
+#
+    def parse_field_map(self, rtgd_config_dict):
+        """Parse the field map."""
 
-        # Reset our loop stats.
-        self.buffer.reset_loop_stats()
+        _field_map = rtgd_config_dict.get("FieldMap", None)
 
 
 # ============================================================================
-#                             class RtgdBuffer
+#                           class ObsBuffer
 # ============================================================================
 
 
-class RtgdBuffer(object):
+class ObsBuffer(object):
+    """Base class to buffer an obs."""
+
+    def __init__(self, stats, units=None, history=False):
+        self.units = units
+        self.last = None
+        self.lasttime = None
+        if history:
+            self.use_history = True
+            self.history_full = False
+            self.history = []
+        else:
+            self.use_history = False
+
+    def add_value(self, val, ts, hilo=True):
+        """Add a value to my hilo and history stats as required."""
+
+        pass
+
+    def day_reset(self):
+        """Reset the vector obs buffer."""
+
+        pass
+
+    def trim_history(self, ts):
+        """Trim any old data from the history list."""
+
+        # calc ts of oldest sample we want to retain
+        oldest_ts = ts - MAX_AGE
+        # set history_full
+        self.history_full = min([a.ts for a in self.history if a.ts is not None]) <= oldest_ts
+        # remove any values older than oldest_ts
+        self.history = [s for s in self.history if s.ts > oldest_ts]
+
+    def history_max(self, ts, age=MAX_AGE):
+        """Return the max value in my history.
+
+        Search the last age seconds of my history for the max value and the
+        corresponding timestamp.
+
+        Inputs:
+            ts:  the timestamp to start searching back from
+            age: the max age of the records being searched
+
+        Returns:
+            An object of type ObsTuple where value is a 3 way tuple of
+            (value, x component, y component) and ts is the timestamp when
+            it occurred.
+        """
+
+        born = ts - age
+        snapshot = [a for a in self.history if a.ts >= born]
+        if len(snapshot) > 0:
+            _max = max(snapshot, key=itemgetter(1))
+            return ObsTuple(_max[0], _max[1])
+        else:
+            return None
+
+    def history_avg(self, ts, age=MAX_AGE):
+        """Return the average value in my history.
+
+        Search the last age seconds of my history for the max value and the
+        corresponding timestamp.
+
+        Inputs:
+            ts:  the timestamp to start searching back from
+            age: the max age of the records being searched
+
+        Returns:
+            An object of type ObsTuple where value is a 3 way tuple of
+            (value, x component, y component) and ts is the timestamp when
+            it occurred.
+        """
+
+        born = ts - age
+        snapshot = [a.value[0] for a in self.history if a.ts >= born]
+        if len(snapshot) > 0:
+            return float(sum(snapshot)/len(snapshot))
+        else:
+            return None
+
+
+# ============================================================================
+#                             class VectorBuffer
+# ============================================================================
+
+
+class VectorBuffer(ObsBuffer):
+    """Class to buffer vector obs."""
+
+    default_init = (None, None, None, None, None)
+
+    def __init__(self, stats, units=None, history=False):
+        # initialize my superclass
+        super(VectorBuffer, self).__init__(stats, units=units, history=history)
+
+        if stats:
+            self.min = stats.min
+            self.mintime = stats.mintime
+            self.max = stats.max
+            self.max_dir = stats.max_dir
+            self.maxtime = stats.maxtime
+            self.sum = stats.sum
+            self.xsum = stats.xsum
+            self.ysum = stats.ysum
+            self.sumtime = stats.sumtime
+        else:
+            (self.min, self.mintime,
+             self.max, self.max_dir, self.maxtime) = VectorBuffer.default_init
+            self.sum = 0.0
+            self.xsum = 0.0
+            self.ysum = 0.0
+            self.sumtime = 0.0
+
+    def add_value(self, val, ts, hilo=True):
+        """Add a value to my hilo and history stats as required."""
+
+        (w_speed, w_dir) = val
+        if w_speed is not None:
+            if hilo:
+                if self.min is None or w_speed < self.min:
+                    self.min = w_speed
+                    self.mintime = ts
+                if self.max is None or w_speed > self.max:
+                    self.max = w_speed
+                    self.max_dir = w_dir
+                    self.maxtime = ts
+            self.sum += w_speed
+            if self.lasttime:
+                self.sumtime += ts - self.lasttime
+            if w_dir is not None:
+                self.xsum += w_speed * math.cos(math.radians(90.0 - w_dir))
+                self.ysum += w_speed * math.sin(math.radians(90.0 - w_dir))
+            if self.lasttime is None or ts >= self.lasttime:
+                self.last = (w_speed, w_dir)
+                self.lasttime = ts
+            if self.use_history and w_dir is not None:
+                self.history.append(ObsTuple((w_speed,
+                                              math.cos(math.radians(90.0 - w_dir)),
+                                              math.sin(math.radians(90.0 - w_dir))), ts))
+                self.trim_history(ts)
+
+    def day_reset(self):
+        """Reset the vector obs buffer."""
+
+        (self.min, self.mintime,
+         self.max, self.max_dir, self.maxtime) = VectorBuffer.default_init
+        try:
+            self.sum = 0.0
+        except AttributeError:
+            pass
+
+    @property
+    def vec_avg(self):
+        """The day vector average value."""
+
+        return math.sqrt((self.xsum**2 + self.ysum**2) / self.sumtime**2)
+
+    @property
+    def vec_dir(self):
+        """The day vector average direction."""
+
+        _dir = 90.0 - math.degrees(math.atan2(self.ysum, self.xsum))
+        if _dir < 0.0:
+            _dir += 360.0
+        return _dir
+
+
+# ============================================================================
+#                             class ScalarBuffer
+# ============================================================================
+
+
+class ScalarBuffer(ObsBuffer):
+    """Class to buffer scalar obs."""
+
+    default_init = (None, None, None, None, 0.0)
+
+    def __init__(self, stats, units=None, history=False):
+        # initialize my superclass
+        super(ScalarBuffer, self).__init__(stats, units=units, history=history)
+
+        if stats:
+            self.min = stats.min
+            self.mintime = stats.mintime
+            self.max = stats.max
+            self.maxtime = stats.maxtime
+            self.sum = stats.sum
+        else:
+            (self.min, self.mintime,
+             self.max, self.maxtime, self.sum) = ScalarBuffer.default_init
+
+    def add_value(self, val, ts):
+        """Add a value to my stats as required."""
+
+        if val is not None:
+            if self.lasttime is None or ts >= self.lasttime:
+                self.last = val
+                self.lasttime = ts
+            if self.min is None or val < self.min:
+                self.min = val
+                self.mintime = ts
+            if self.max is None or val > self.max:
+                self.max = val
+                self.maxtime = ts
+            self.sum += val
+            if self.use_history:
+                self.history.append(ObsTuple(val, ts))
+                self.trim_history(ts)
+
+    def day_reset(self):
+        """Reset the scalar obs buffer."""
+
+        (self.min, self.mintime,
+         self.max, self.maxtime) = ScalarBuffer.default_init
+        try:
+            self.sum = 0.0
+        except AttributeError:
+            pass
+
+
+# ============================================================================
+#                               class Buffer
+# ============================================================================
+
+
+class Buffer(dict):
     """Class to buffer various loop packet obs.
 
     If archive based stats are an efficient means of getting stats for today.
@@ -1803,263 +2040,170 @@ class RtgdBuffer(object):
     reflected.
     """
 
-    def __init__(self):
+
+
+    def __init__(self, manifest, day_stats, additional_day_stats):
         """Initialise an instance of our class."""
 
-        # Initialise min/max for loop data received since last archive record
-        # and sum/counter for windrun calculator
-        # initialise sum/counter for windrun calculator and sum for rain
-        self.windsum = 0
-        self.windcount = 0
-        self.rainsum = 0
+        self.manifest = manifest
+        # seed our buffer objects from day_stats
+        for obs in [f for f in day_stats if f in self.manifest]:
+            seed_func = seed_functions.get(obs, Buffer.seed_scalar)
+            seed_func(self, day_stats, obs, history=obs in HIST_MANIFEST)
+        # seed our buffer objects from additional_day_stats
+        if additional_day_stats:
+            for obs in [f for f in additional_day_stats if f in self.manifest]:
+                if obs not in self:
+                    seed_func = seed_functions.get(obs, Buffer.seed_scalar)
+                    seed_func(self, additional_day_stats, obs,
+                              history=obs in HIST_MANIFEST)
+        self.primary_unit_system = day_stats.unit_system
+        self.last_windSpeed_ts = None
+        self.windrun = self.seed_windrun(day_stats)
 
-        # initialise loop period low/high/max stats
-        self.tempL_loop = [None, None]
-        self.tempH_loop = [None, None]
-        self.dewpointL_loop = [None, None]
-        self.dewpointH_loop = [None, None]
-        self.apptempL_loop = [None, None]
-        self.apptempH_loop = [None, None]
-        self.wchillL_loop = [None, None]
-        self.heatindexH_loop = [None, None]
-        self.wgustM_loop = [None, None, None]
-        self.pressL_loop = [None, None]
-        self.pressH_loop = [None, None]
-        self.rrateH_loop = [None, None]
-        self.humL_loop = [None, None]
-        self.humH_loop = [None, None]
-        self.windM_loop = [None, None]
-        self.UVH_loop = [None, None]
-        self.SolarH_loop = [None, None]
+    def seed_scalar(self, stats, obs_type, history):
+        """Seed a scalar buffer."""
 
-        # Setup lists/flags for 5 and 10 minute wind stats
-        self.wind_list = []
-        self.wind_dir_list = []
+        self[obs_type] = init_dict.get(obs_type, ScalarBuffer)(stats=stats[obs_type],
+                                                               units=stats.unit_system,
+                                                               history=history)
 
-        # set length of time to retain wind obs
-        self.wind_period = 600
+    def seed_vector(self, stats, obs_type, history):
+        """Seed a vector buffer."""
 
-    def reset_loop_stats(self):
-        """Reset loop windrun sum/count and loop low/high/max stats.
+        self[obs_type] = init_dict.get(obs_type, VectorBuffer)(stats=stats[obs_type],
+                                                               units=stats.unit_system,
+                                                               history=history)
 
-        Normally performed when the class is initialised and at the end of each
-        archive period.
-        """
+    def seed_windrun(self, day_stats):
+        """Seed day windrun."""
 
-        # reset sum/counter for windrun calculator and sum for rain
-        self.windsum = 0
-        self.windcount = 0
-        self.rainsum = 0
+        if 'windSpeed' in day_stats:
+            # The wsum field hold the sum of (windSpeed * interval in seconds)
+            # for today so we can calculate windrun from wsum - just need to
+            # do a little unit conversion and scaling
 
-        # reset loop period low/high/max stats
-        self.tempL_loop = [None, None]
-        self.tempH_loop = [None, None]
-        self.dewpointL_loop = [None, None]
-        self.dewpointH_loop = [None, None]
-        self.apptempL_loop = [None, None]
-        self.apptempH_loop = [None, None]
-        self.wchillL_loop = [None, None]
-        self.heatindexH_loop = [None, None]
-        self.wgustM_loop = [None, None, None]
-        self.pressL_loop = [None, None]
-        self.pressH_loop = [None, None]
-        self.rrateH_loop = [None, None]
-        self.humL_loop = [None, None]
-        self.humH_loop = [None, None]
-        self.windM_loop = [None, None]
-        self.UVH_loop = [None, None]
-        self.SolarH_loop = [None, None]
-
-    def averageWind(self):
-        """ Calculate average wind speed over an archive interval period.
-
-        Archive stats are defined on fixed 'archive interval' boundaries.
-        gauge-data.txt requires the average wind speed over the last
-        'archive interval' seconds. This means calculating over the last
-        'archive interval' seconds ending on the current loop period. This is
-        achieved by keeping a list of last 'archive interval' of loop wind
-        speed data and calculating a simple average.
-        Units used are loop data units so unit conversion of the result may be
-        required.
-        Result is only considered valid if a full 'archive interval' of loop
-        wind data is held.
-
-        Inputs:
-            Nothing
-
-        Returns:
-            Average wind speed over the last 'archive interval' seconds
-        """
-
-        if len(self.wind_list) > 0:
-            average = sum(w for w, _ in self.wind_list)/float(len(self.wind_list))
+            # The day_stats units may be different to our buffer unit system so
+            # first convert the wsum value to a km_per_hour based value (the
+            # wsum 'units' are a distance but we can use the group_speed
+            # conversion to convert to a km_per_hour based value)
+            # first get the day_stats windSpeed unit and unit group
+            (unit, group) = weewx.units.getStandardUnitType(day_stats.unit_system,
+                                                            'windSpeed')
+            # now express wsum as a 'group_speed' ValueTuple
+            _wr_vt = ValueTuple(day_stats['windSpeed'].wsum, unit, group)
+            # convert it to a 'km_per_hour' based value
+            _wr_km = convert(_wr_vt, 'km_per_hour').value
+            # but _wr_km was based on wsum which was based on seconds not hours
+            # so we need to divide by 3600 to get our real windrun in km
+            windrun = _wr_km/3600.0
         else:
-            average = 0.0
-        return average
+            windrun = 0.0
+        return windrun
 
-    def tenMinuteAverageWindDir(self):
-        """ Calculate average wind direction over the last 10 minutes.
+    def add_packet(self, packet):
+        """Add a packet to the buffer."""
 
-        Takes list of last 10 minutes of loop wind speed and direction data and
-        calculates a vector average direction.
-        Result is only considered valid if a full 10 minutes of loop wind data
-        is held.
+#        packet = weewx.units.to_std_system(packet, self.primary_unit_system)
+        if packet['dateTime'] is not None:
+            for obs in [f for f in packet if f in self.manifest]:
+                add_func = add_functions.get(obs, Buffer.add_value)
+                add_func(self, packet, obs)
 
-        Inputs:
-            Nothing
+    def add_value(self, packet, obs):
+        """Add a value to the buffer."""
 
-        Returns:
-            10 minute vector average wind direction
-        """
-
-        if len(self.wind_dir_list) > 0:
-            avg_dir = 90.0 - math.degrees(math.atan2(sum(y for x, y, s, d, t in self.wind_dir_list),
-                                                     sum(x for x, y, s, d, t in self.wind_dir_list)))
-            avg_dir = avg_dir if avg_dir > 0 else avg_dir + 360.0
+        # if we haven't seen this obs before add it to our buffer
+        if obs not in self:
+            self[obs] = init_dict.get(obs, ScalarBuffer)(stats=None,
+                                                         units=packet['usUnits'],
+                                                         history=obs in HIST_MANIFEST)
+        if self[obs].units == packet['usUnits']:
+            _value = packet[obs]
         else:
-            avg_dir = None
-        return avg_dir
+            (unit, group) = getStandardUnitType(packet['usUnits'], obs)
+            _vt = ValueTuple(packet[obs], unit, group)
+            _value = weewx.units.convertStd(_vt, self[obs].units).value
+        self[obs].add_value(_value, packet['dateTime'])
 
-    def tenMinuteWindGust(self):
-        """ Calculate 10 minute wind gust.
+    def add_wind_value(self, packet, obs):
+        """Add a wind value to the buffer."""
 
-        Takes list of last 10 minutes of loop wind speed data and finds the max
-        value.  Units used are loop data units so unit conversion of the result
-        may be required.
-        Result is only considered valid if a full 10 minutes of loop wind data
-        is held.
+        # first add it as 'windSpeed' the scalar
+        self.add_value(packet, obs)
 
-        Inputs:
-            Nothing
+        # update today's windrun
+        if 'windSpeed' in packet:
+            try:
+                self.windrun += packet['windSpeed'] * (packet['dateTime'] - self.last_windSpeed_ts)/1000.0
+            except TypeError:
+                pass
+            self.last_windSpeed_ts = packet['dateTime']
 
-        Returns:
-            10 minute wind gust
+        # now add it as the special vector 'wind'
+        if 'wind' not in self:
+            self['wind'] = VectorBuffer(stats=None, units=packet['usUnits'])
+        if self['wind'].units == packet['usUnits']:
+            _value = packet['windSpeed']
+        else:
+            (unit, group) = getStandardUnitType(packet['usUnits'], 'windSpeed')
+            _vt = ValueTuple(packet['windSpeed'], unit, group)
+            _value = weewx.units.convertStd(_vt, self['wind'].units).value
+        self['wind'].add_value((_value, packet.get('windDir')),
+                               packet['dateTime'])
+
+    def start_of_day_reset(self):
+        """Reset our buffer stats at the end of an archive period.
+
+        Reset our hi/lo data but don't touch the history, it might need to be
+        kept longer than the end of the archive period.
         """
 
-        gust = None
-        if len(self.wind_list) > 0:
-            gust = max(s for s,t in self.wind_list)
-        return gust
+        for obs in self.manifest:
+            self[obs].day_reset()
 
-    def setLowsAndHighs(self, packet):
-        """ Update loop highs and lows with new loop data.
 
-        Almost operates as a mini weeWX accumulator but wind data is stored in
-        lists to allow samples to be added at one end and old samples dropped
-        at the other end.
+# ============================================================================
+#                            Configuration dictionaries
+# ============================================================================
 
-        -   Look at each loop packet and update lows and highs as required.
-        -   Add wind speed/direction data to archive_interval and 10 minute
-            lists used for average and 10 minute wind stats
+init_dict = ListOfDicts({'wind': VectorBuffer})
+add_functions = ListOfDicts({'windSpeed': Buffer.add_wind_value})
+seed_functions = ListOfDicts({'wind': Buffer.seed_vector})
 
-        Inputs:
-            packet: loop data packet
 
-        Returns:
-            Nothing but updates various low/high stats and 'archive interval'
-            and 10 minute wind data lists
-        """
+# ============================================================================
+#                              class ObsTuple
+# ============================================================================
 
-        packet_d = dict(packet)
-        ts = packet_d['dateTime']
 
-        # process temp
-        outTemp = packet_d.get('outTemp', None)
-        if outTemp is not None:
-            self.tempL_loop = [outTemp, ts] if (outTemp < self.tempL_loop[0] or self.tempL_loop[0] is None) else self.tempL_loop
-            self.tempH_loop = [outTemp, ts] if outTemp > self.tempH_loop[0] else self.tempH_loop
+# A observation during some period can be represented by the value of the
+# observation and the time at which it was observed. This can be represented
+# in a 2 way tuple called an obs tuple. An obs tuple is useful because its
+# contents can be accessed using named attributes.
+#
+# Item   attribute   Meaning
+#    0    value      The observed value eg 19.5
+#    1    ts         The epoch timestamp that the value was observed
+#                    eg 1488245400
+#
+# It is valid to have an observed value of None.
+#
+# It is also valid to have a ts of None (meaning there is no information about
+# the time the was was observed.
 
-        # process dewpoint
-        dewpoint = packet_d.get('dewpoint', None)
-        if dewpoint is not None:
-            self.dewpointL_loop = [dewpoint, ts] if (dewpoint < self.dewpointL_loop[0] or self.dewpointL_loop[0] is None) else self.dewpointL_loop
-            self.dewpointH_loop = [dewpoint, ts] if dewpoint > self.dewpointH_loop[0] else self.dewpointH_loop
+class ObsTuple(tuple):
 
-        # process appTemp
-        appTemp = packet_d.get('appTemp', None)
-        if appTemp is not None:
-            self.apptempL_loop = [appTemp, ts] if (appTemp < self.apptempL_loop[0] or self.apptempL_loop[0] is None) else self.apptempL_loop
-            self.apptempH_loop = [appTemp, ts] if appTemp > self.apptempH_loop[0] else self.apptempH_loop
+    def __new__(cls, *args):
+        return tuple.__new__(cls, args)
 
-        # process windchill
-        windchill = packet_d.get('windchill', None)
-        if windchill is not None:
-            self.wchillL_loop = [windchill, ts] if (windchill < self.wchillL_loop[0] or self.wchillL_loop[0] is None) else self.wchillL_loop
+    @property
+    def value(self):
+        return self[0]
 
-        # process heatindex
-        heatindex = packet_d.get('heatindex', None)
-        if heatindex is not None:
-            self.heatindexH_loop = [heatindex, ts] if heatindex > self.heatindexH_loop[0] else self.heatindexH_loop
-
-        # process barometer
-        barometer = packet_d.get('barometer', None)
-        if barometer is not None:
-            self.pressL_loop = [barometer, ts] if (barometer < self.pressL_loop[0] or self.pressL_loop[0] is None) else self.pressL_loop
-            self.pressH_loop = [barometer, ts] if barometer > self.pressH_loop[0] else self.pressH_loop
-
-        # process rain
-        rain = packet_d.get('rain', None)
-        self.rainsum += rain if rain is not None else self.rainsum
-
-        # process rainRate
-        rainRate = packet_d.get('rainRate', None)
-        if rainRate is not None:
-            self.rrateH_loop = [rainRate, ts] if rainRate > self.rrateH_loop[0] else self.rrateH_loop
-
-        # process humidity
-        outHumidity = packet_d.get('outHumidity', None)
-        if outHumidity is not None:
-            self.humL_loop = [outHumidity, ts] if (outHumidity < self.humL_loop[0] or self.humL_loop[0] is None) else self.humL_loop
-            self.humH_loop = [outHumidity, ts] if outHumidity > self.humH_loop[0] else self.humH_loop
-
-        # process UV
-        UV = packet_d.get('UV', None)
-        if UV is not None:
-            self.UVH_loop = [UV, ts] if UV > self.UVH_loop[0] else self.UVH_loop
-
-        # process radiation
-        radiation = packet_d.get('radiation', None)
-        if radiation is not None:
-            self.SolarH_loop = [radiation, ts] if radiation > self.SolarH_loop[0] else self.SolarH_loop
-
-        # process windSpeed/windDir
-        # if windDir exists then get it, if it does not exist get None
-        windDir = packet_d.get('windDir', None)
-        # if windSpeed exists get it, if it does not exist or is None then
-        # get 0.0
-        windSpeed = packet_d.get('windSpeed', 0.0)
-        windSpeed = 0.0 if windSpeed is None else windSpeed
-        self.windsum += windSpeed
-        self.windcount += 1
-        # Have we seen a new high gust? If so update self.wgustM_loop but only
-        # if we have a corresponding wind direction
-        if windSpeed > self.wgustM_loop[0] and windDir is not None:
-            self.wgustM_loop = [windSpeed, windDir, ts]
-        # average wind speed
-        self.wind_list.append([windSpeed, ts])
-        # if we have samples in our list then delete any too old
-        if len(self.wind_list) > 0:
-            # calc ts of oldest sample we want to retain
-            old_ts = ts - self.wind_period
-            # Remove any samples older than 5 minutes
-            self.wind_list = [s for s in self.wind_list if s[1] > old_ts]
-        # get our latest (archive_interval) average wind
-        windM_loop = self.averageWind()
-        # have we seen a new high (archive_interval) avg wind? if so update
-        # self.windM_loop
-        self.windM_loop = [windM_loop, ts] if windM_loop > self.windM_loop[0] else self.windM_loop
-        # Update the 10 minute wind direction list, but only if windDir is not
-        # None
-        if windDir is not None:
-            self.wind_dir_list.append([windSpeed * math.cos(math.radians(90.0 - windDir)),
-                                      windSpeed * math.sin(math.radians(90.0 - windDir)),
-                                      windSpeed, windDir, ts])
-        # if we have samples in our list then delete any too old
-        if len(self.wind_dir_list) > 0:
-            # calc ts of oldest sample we want to retain
-            old_ts = ts - self.wind_period
-            # Remove any samples older than 10 minutes
-            self.wind_dir_list = [s for s in self.wind_dir_list if s[4] > old_ts]
+    @property
+    def ts(self):
+        return self[1]
 
 
 # ============================================================================
