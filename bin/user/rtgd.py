@@ -972,53 +972,42 @@ class RealtimeGaugeDataThread(threading.Thread):
                                     self.forecast_text = _package['payload']
                     # now deal with the control queue
                     try:
-                    # block for one second waiting for package, if nothing
-                    # received throw Queue.Empty
-                    _package = self.control_queue.get(True, 1.0)
-                except Queue.Empty:
-                    # nothing in the queue so continue
-                    pass
-                else:
-                    # a None record is our signal to exit
-                    if _package is None:
-                        return
-                    elif _package['type'] == 'archive':
-                        if weewx.debug == 2:
-                            logdbg("rtgdthread",
-                                   "received archive record (%s)" % _package['payload']['dateTime'])
-                        elif weewx.debug >= 3:
-                            logdbg("rtgdthread",
-                                   "received archive record: %s" % _package['payload'])
-                        self.new_archive_record(_package['payload'])
-                        self.rose = calc_windrose(_package['payload']['dateTime'],
-                                                  self.db_manager,
-                                                  self.wr_period,
-                                                  self.wr_points)
-                        if weewx.debug == 2:
-                            logdbg("rtgdthread", "windrose data calculated")
-                        elif weewx.debug >= 3:
-                            logdbg("rtgdthread",
-                                   "windrose data calculated: %s" % (self.rose,))
-                        continue
-                    elif _package['type'] == 'event':
-                        if _package['payload'] == weewx.END_ARCHIVE_PERIOD:
-                            logdbg2("rtgdthread",
-                                    "received event - END_ARCHIVE_PERIOD")
-                            self.end_archive_period()
-                        continue
-                    elif _package['type'] == 'stats':
-                        if weewx.debug == 2:
-                            logdbg("rtgdthread",
-                                   "received stats package")
-                        elif weewx.debug >= 3:
-                            logdbg("rtgdthread",
-                                   "received stats package: %s" % _package['payload'])
-                        self.process_stats(_package['payload'])
-                        continue
-                    elif _package['type'] == 'loop':
-                        # we now have a packet to process, wrap in a
-                        # try..except so we can catch any errors
-                        try:
+                        # block for one second waiting for package, if nothing
+                        # received throw Queue.Empty
+                        _package = self.control_queue.get(True, 1.0)
+                    except Queue.Empty:
+                        # nothing in the queue so continue
+                        pass
+                    else:
+                        # a None record is our signal to exit
+                        if _package is None:
+                            return
+                        elif _package['type'] == 'archive':
+                            if weewx.debug == 2:
+                                logdbg("rtgdthread",
+                                       "received archive record (%s)" % _package['payload']['dateTime'])
+                            elif weewx.debug >= 3:
+                                logdbg("rtgdthread",
+                                       "received archive record: %s" % _package['payload'])
+                            self.new_archive_record(_package['payload'])
+                            self.rose = calc_windrose(_package['payload']['dateTime'],
+                                                      self.db_manager,
+                                                      self.wr_period,
+                                                      self.wr_points)
+                            if weewx.debug == 2:
+                                logdbg("rtgdthread", "windrose data calculated")
+                            elif weewx.debug >= 3:
+                                logdbg("rtgdthread",
+                                       "windrose data calculated: %s" % (self.rose,))
+                            continue
+                        elif _package['type'] == 'event':
+### FIX ME - do we need this event?
+                            if _package['payload'] == weewx.END_ARCHIVE_PERIOD:
+                                logdbg2("rtgdthread",
+                                        "received event - END_ARCHIVE_PERIOD")
+                                # self.end_archive_period()
+                            continue
+                        elif _package['type'] == 'stats':
                             if weewx.debug == 2:
                                 logdbg("rtgdthread",
                                        "received stats package")
