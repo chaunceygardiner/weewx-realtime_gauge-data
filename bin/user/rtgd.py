@@ -17,9 +17,19 @@
 # You should have received a copy of the GNU General Public License along with
 # this program.  If not, see http://www.gnu.org/licenses/.
 #
-# Version: 0.3.0                                      Date: 4 September 2017
+# Version: 0.3.3                                      Date: ?? January 2018
 #
 # Revision History
+#   ?? January 2018     v0.3.3
+#       - implemented atomic write when writing gauge-data.txt to file
+#   20 January 2018     v0.3.2
+#       - modified rtgdthread queue management to fix 100% CPU usage issue
+#   3 December 2017     v0.3.1
+#       - added ignore_lost_contact config option to ignore the sensor contact
+#         check result
+#       - refactored lost contact flag check code, now uses a dedicated method
+#         to determine whether sensor contact has been lost
+#       - changed a syslog entry to indicate 'rtgd' as the source not 'engine'
 #   4 September 2017    v0.3.0
 #       - added ability to include Weather Underground forecast text
 #   8 July 2017         v0.2.14
@@ -57,7 +67,7 @@
 #         'wedge' would occasionally temporarily disappear from wind speed
 #         gauge
 #   28 February 2017    v0.2.8
-#       - Reworked day max/min calculations to better handle missing historical
+#       - reworked day max/min calculations to better handle missing historical
 #         data. If historical max/min data is missing day max/min will default
 #         to the current value for the obs concerned.
 #   26 February 2017    v0.2.7
@@ -217,6 +227,12 @@ https://github.com/mcrossley/SteelSeries-Weather-Gauges/tree/master/weather_serv
     # which cached data is retained. Optional, default is 600 seconds.
     max_cache_age = 600
 
+    # It is possible to ignore the sensor contact check result for the station
+    # and always set the gauge-data.txt SensorContactLost field to 0 (sensor
+    # contact not lost). This option should be used with care as it may mask a
+    # legitimate sensor lost contact state. Optional, default is False.
+    ignore_lost_contact = False
+
     # Parameters used in/required by rtgd calculations
     [[Calculate]]
         # Atmospheric transmission coefficient [0.7-0.91]. Optional, default
@@ -374,6 +390,7 @@ import errno
 import httplib
 import json
 import math
+import os
 import os.path
 import socket
 import syslog
@@ -689,6 +706,7 @@ class RealtimeGaugeDataThread(threading.Thread):
         self.rtgd_path_file = os.path.join(self.rtgd_path,
                                            rtgd_config_dict.get('rtgd_file_name',
                                                                 'gauge-data.txt'))
+        self.rtgd_path_file_tmp = self.rtgd_path_file + '.tmp'
 
         # get the remote server URL if it exists, if it doesn't set it to None
         self.remote_server_url = rtgd_config_dict.get('remote_server_url', None)
@@ -826,7 +844,11 @@ class RealtimeGaugeDataThread(threading.Thread):
 #        # create a Buffer object to hold our loop 'stats'
 #        self.buffer = Buffer(MANIFEST)
 
-        # Set our lost contact flag. Assume we start off with contact
+        # Lost contact
+        # do we ignore the lost contact 'calculation'
+        self.ignore_lcontact = to_bool(rtgd_config_dict.get('ignore_lost_contact',
+                                                            False))
+        # set the lost contact flag, assume we start off with contact
         self.lost_contact_flag = False
 
         # initialise some properties used to hold archive period wind data
@@ -847,6 +869,8 @@ class RealtimeGaugeDataThread(threading.Thread):
         # gauge-data.txt version
         self.version = str(GAUGE_DATA_VERSION)
 
+        # notify the user of a couple of things that we will do
+        # frequency of generation
         if self.min_interval is None:
             _msg = "RealTimeGaugeData will generate gauge-data.txt. "\
                        "min_interval is None"
@@ -855,7 +879,10 @@ class RealtimeGaugeDataThread(threading.Thread):
                        "min_interval is 1 second"
         else:
             _msg = "RealTimeGaugeData will generate gauge-data.txt. min_interval is %s seconds" % self.min_interval
-        loginf("engine", _msg)
+        loginf("rtgd", _msg)
+        # lost contact
+        if self.ignore_lcontact:
+            loginf("rtgd", "RealTimeGaugeData will ignore sensor contact state")
 
     def run(self):
         """Collect packets from the rtgd queue and manage their processing.
@@ -945,40 +972,53 @@ class RealtimeGaugeDataThread(threading.Thread):
                                     self.forecast_text = _package['payload']
                     # now deal with the control queue
                     try:
-                        _package = self.control_queue.get_nowait()
-                    except Queue.Empty:
-                        # nothing in the queue so continue
-                        pass
-                    else:
-                        # a None record is our signal to exit
-                        if _package is None:
-                            return
-                        elif _package['type'] == 'archive':
-                            if weewx.debug == 2:
-                                logdbg("rtgdthread",
-                                       "received archive record (%s)" % _package['payload']['dateTime'])
-                            elif weewx.debug >= 3:
-                                logdbg("rtgdthread",
-                                       "received archive record: %s" % _package['payload'])
-                            self.new_archive_record(_package['payload'])
-                            self.rose = calc_windrose(_package['payload']['dateTime'],
-                                                      self.db_manager,
-                                                      self.wr_period,
-                                                      self.wr_points)
-                            if weewx.debug == 2:
-                                logdbg("rtgdthread", "windrose data calculated")
-                            elif weewx.debug >= 3:
-                                logdbg("rtgdthread",
-                                       "windrose data calculated: %s" % (self.rose,))
-                            continue
-                        elif _package['type'] == 'event':
-### FIX ME - do we need this event?
-                            if _package['payload'] == weewx.END_ARCHIVE_PERIOD:
-                                logdbg2("rtgdthread",
-                                        "received event - END_ARCHIVE_PERIOD")
-                                # self.end_archive_period()
-                            continue
-                        elif _package['type'] == 'stats':
+                    # block for one second waiting for package, if nothing
+                    # received throw Queue.Empty
+                    _package = self.control_queue.get(True, 1.0)
+                except Queue.Empty:
+                    # nothing in the queue so continue
+                    pass
+                else:
+                    # a None record is our signal to exit
+                    if _package is None:
+                        return
+                    elif _package['type'] == 'archive':
+                        if weewx.debug == 2:
+                            logdbg("rtgdthread",
+                                   "received archive record (%s)" % _package['payload']['dateTime'])
+                        elif weewx.debug >= 3:
+                            logdbg("rtgdthread",
+                                   "received archive record: %s" % _package['payload'])
+                        self.new_archive_record(_package['payload'])
+                        self.rose = calc_windrose(_package['payload']['dateTime'],
+                                                  self.db_manager,
+                                                  self.wr_period,
+                                                  self.wr_points)
+                        if weewx.debug == 2:
+                            logdbg("rtgdthread", "windrose data calculated")
+                        elif weewx.debug >= 3:
+                            logdbg("rtgdthread",
+                                   "windrose data calculated: %s" % (self.rose,))
+                        continue
+                    elif _package['type'] == 'event':
+                        if _package['payload'] == weewx.END_ARCHIVE_PERIOD:
+                            logdbg2("rtgdthread",
+                                    "received event - END_ARCHIVE_PERIOD")
+                            self.end_archive_period()
+                        continue
+                    elif _package['type'] == 'stats':
+                        if weewx.debug == 2:
+                            logdbg("rtgdthread",
+                                   "received stats package")
+                        elif weewx.debug >= 3:
+                            logdbg("rtgdthread",
+                                   "received stats package: %s" % _package['payload'])
+                        self.process_stats(_package['payload'])
+                        continue
+                    elif _package['type'] == 'loop':
+                        # we now have a packet to process, wrap in a
+                        # try..except so we can catch any errors
+                        try:
                             if weewx.debug == 2:
                                 logdbg("rtgdthread",
                                        "received stats package")
@@ -1061,8 +1101,7 @@ class RealtimeGaugeDataThread(threading.Thread):
                     logdbg("rtgdthread",
                            "created cached loop packet: %s" % (cached_packet,))
                 # set our lost contact flag if applicable
-                if self.station_type in LOOP_STATIONS:
-                    self.lost_contact_flag = cached_packet[STATION_LOST_CONTACT[self.station_type]['field']] == STATION_LOST_CONTACT[self.station_type]['value']
+                self.lost_contact_flag = self.get_lost_contact(cached_packet, 'loop')
                 # get a data dict from which to construct our file
                 data = self.calculate(cached_packet)
                 # write to our file
@@ -1164,8 +1203,9 @@ class RealtimeGaugeDataThread(threading.Thread):
 
         Takes dictionary of data elements, converts them to JSON format and
         writes them to file. JSON output is sorted by key and any non-critical
-        whitespace removed before being written to file. Destination directory
-        is created if it does not exist.
+        whitespace removed before being written to file. An atomic write to
+        file is used to lessen chance of rtgd/web server file access conflict.
+        Destination directory is created if it does not exist.
 
         Inputs:
             data: dictionary of gauge-data.txt data elements
@@ -1179,9 +1219,11 @@ class RealtimeGaugeDataThread(threading.Thread):
             # raise if the error is anything other than the dir already exists
             if error.errno != errno.EEXIST:
                 raise
-        # now write to file
-        with open(self.rtgd_path_file, 'w') as f:
+        # now write to temporary file
+        with open(self.rtgd_path_file_tmp, 'w') as f:
             json.dump(data, f, separators=(',', ':'), sort_keys=True)
+        # and copy the temporary file to our destination
+        os.rename(self.rtgd_path_file_tmp, self.rtgd_path_file)
 
     def get_scroller_text(self):
         """Obtain the text string to be used in the scroller.
@@ -1769,8 +1811,7 @@ class RealtimeGaugeDataThread(threading.Thread):
         """Control processing when new a archive record is presented."""
 
         # set our lost contact flag if applicable
-        if self.station_type in ARCHIVE_STATIONS:
-            self.lost_contact_flag = record[STATION_LOST_CONTACT[self.station_type]['field']] == STATION_LOST_CONTACT[self.station_type]['value']
+        self.lost_contact_flag = self.get_lost_contact(record, 'archive')
         # save the windSpeed value to use as our archive period average
         if 'windSpeed' in record:
             self.windSpeedAvg_vt = weewx.units.as_value_tuple(record, 'windSpeed')
@@ -1796,6 +1837,24 @@ class RealtimeGaugeDataThread(threading.Thread):
         """Parse the field map."""
 
         _field_map = rtgd_config_dict.get("FieldMap", None)
+
+    def get_lost_contact(self, rec, type):
+        """Determine is station has lost contact with sensors."""
+
+        # default to lost contact = False
+        result = False
+        # if we are not ignoring the lost contact test do the check
+        if not self.ignore_lcontact:
+            if ((type == 'loop' and self.station_type in LOOP_STATIONS) or
+                    (type == 'archive' and self.station_type in ARCHIVE_STATIONS)):
+                _v = STATION_LOST_CONTACT[self.station_type]['value']
+                try:
+                    result = rec[STATION_LOST_CONTACT[self.station_type]['field']] == _v
+                except KeyError:
+                    logdbg("rtgd",
+                           "KeyError: Could not determine sensor contact state")
+                    result = True
+        return result
 
 
 # ============================================================================
@@ -2356,7 +2415,7 @@ def calc_trend(obs_type, now_vt, group, db_manager, then_ts, grace=0):
     if then_record is None:
         return None
     else:
-        if obs_type not in then_record or then_record[obs_type] is None:
+        if obs_type not in then_record:
             return None
         else:
             then_vt = weewx.units.as_value_tuple(then_record, obs_type)
