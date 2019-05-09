@@ -1,3 +1,5 @@
+v0.4.0
+*   now compatible with python2.6 and python3.5 and later
 v0.3.7
 *   revised WU API response parsing to eliminate occasional errors where no
     forecast text was found

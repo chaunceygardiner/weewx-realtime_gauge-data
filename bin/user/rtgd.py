@@ -17,9 +17,11 @@ PARTICULAR PURPOSE.  See the GNU General Public License for more details.
 You should have received a copy of the GNU General Public License along with
 this program.  If not, see http://www.gnu.org/licenses/.
 
-  Version: 0.3.7                                      Date: 4 April 2019
+  Version: 0.4.0a1                                    Date: ? May 2019
 
   Revision History
+    ? May 2019          v0.4.0
+        - now compatible with python 2.6 and later and python 3.5 and later
     4 April 2019        v0.3.7
         - revised WU API response parsing to eliminate occasional errors where
           no forecast text was found
@@ -522,10 +524,8 @@ Handy things/conditions noted from analysis of SteelSeries Weather Gauges:
 """
 
 # python imports
-import Queue
 import datetime
 import errno
-import httplib
 import json
 import math
 import os
@@ -534,7 +534,12 @@ import socket
 import syslog
 import threading
 import time
-import urllib2
+
+# Python 2/3 compatibility shims
+import six
+from six.moves import http_client
+from six.moves import queue
+from six.moves import urllib
 
 # weeWX imports
 import weewx
@@ -546,7 +551,7 @@ from weewx.units import ValueTuple, convert, getStandardUnitType
 from weeutil.weeutil import to_bool, to_int, startOfDay
 
 # version number of this script
-RTGD_VERSION = '0.3.7'
+RTGD_VERSION = '0.4.0a1'
 # version number (format) of the generated gauge-data.txt
 GAUGE_DATA_VERSION = '14'
 
@@ -649,7 +654,7 @@ class RealtimeGaugeData(StdService):
         # initialize my superclass
         super(RealtimeGaugeData, self).__init__(engine, config_dict)
 
-        self.rtgd_ctl_queue = Queue.Queue()
+        self.rtgd_ctl_queue = queue.Queue()
         # get our RealtimeGaugeData config dictionary
         rtgd_config_dict = config_dict.get('RealtimeGaugeData', {})
         manager_dict = weewx.manager.get_manager_dict_from_config(config_dict,
@@ -701,8 +706,8 @@ class RealtimeGaugeData(StdService):
             loginf("rtgd", "Unknown block specified for scroller_text")
             source_class = Source
         # create queues for passing data and controlling our block object
-        self.source_ctl_queue = Queue.Queue()
-        self.result_queue = Queue.Queue()
+        self.source_ctl_queue = queue.Queue()
+        self.result_queue = queue.Queue()
         # get the block object
         source_object = source_class(self.source_ctl_queue,
                                      self.result_queue,
@@ -1162,7 +1167,7 @@ class RealtimeGaugeDataThread(threading.Thread):
                     try:
                         # use nowait() so we don't block
                         _package = self.result_queue.get_nowait()
-                    except Queue.Empty:
+                    except queue.Empty:
                         # nothing in the queue so continue
                         pass
                     else:
@@ -1179,7 +1184,7 @@ class RealtimeGaugeDataThread(threading.Thread):
                     # block for one second waiting for package, if nothing
                     # received throw Queue.Empty
                     _package = self.control_queue.get(True, 1.0)
-                except Queue.Empty:
+                except queue.Empty:
                     # nothing in the queue so continue
                     pass
                 else:
@@ -1231,7 +1236,7 @@ class RealtimeGaugeDataThread(threading.Thread):
                                        "received loop packet: %s" % _package['payload'])
                             self.process_packet(_package['payload'])
                             continue
-                        except Exception, e:
+                        except Exception as e:
                             # Some unknown exception occurred. This is probably
                             # a serious problem. Exit.
                             logcrit("rtgdthread",
@@ -1290,7 +1295,7 @@ class RealtimeGaugeDataThread(threading.Thread):
                 logdbg2("rtgdthread",
                         "gauge-data.txt (%s) generated in %.5f seconds" % (cached_packet['dateTime'],
                                                                            (self.last_write-t1)))
-            except Exception, e:
+            except Exception as e:
                 weeutil.weeutil.log_traceback('rtgdthread: **** ')
         else:
             # we skipped this packet so log it
@@ -1304,7 +1309,7 @@ class RealtimeGaugeDataThread(threading.Thread):
         """
 
         if package is not None:
-            for key, value in package.iteritems():
+            for key, value in package.items():
                 setattr(self, key, value)
 
     def post_data(self, data):
@@ -1322,7 +1327,7 @@ class RealtimeGaugeDataThread(threading.Thread):
         """
 
         # get a Request object
-        req = urllib2.Request(self.remote_server_url)
+        req = urllib.request.Request(self.remote_server_url)
         # set our content type to json
         req.add_header('Content-Type', 'application/json')
         # POST the data but wrap in a try..except so we can trap any errors
@@ -1347,8 +1352,8 @@ class RealtimeGaugeDataThread(threading.Thread):
             # we received a bad response code, log it and continue
             logdbg("rtgdthread",
                    "Failed to post data: Code %s" % response.code())
-        except (urllib2.URLError, socket.error,
-                httplib.BadStatusLine, httplib.IncompleteRead), e:
+        except (urllib.error.URLError, socket.error,
+                http_client.BadStatusLine, http_client.IncompleteRead) as e:
             # an exception was thrown, log it and continue
             logdbg("rtgdthread", "Failed to post data: %s" % e)
 
@@ -1363,16 +1368,9 @@ class RealtimeGaugeDataThread(threading.Thread):
             The urllib2.urlopen() response
         """
 
-        try:
-            # Python 2.5 and earlier do not have a "timeout" parameter.
-            # Including one could cause a TypeError exception. Be prepared
-            # to catch it.
-            _response = urllib2.urlopen(request,
-                                        data=payload,
-                                        timeout=self.timeout)
-        except TypeError:
-            # Must be Python 2.5 or early. Use a simple, unadorned request
-            _response = urllib2.urlopen(request, data=payload)
+        _response = urllib.request.urlopen(request,
+                                           data=payload,
+                                           timeout=self.timeout)
         return _response
 
     def write_data(self, data):
@@ -2690,7 +2688,7 @@ class ThreadedSource(threading.Thread):
                     # seconds. If nothing is there an empty queue exception
                     # will be thrown after 60 seconds
                     _package = self.control_queue.get(block=True, timeout=60)
-                except Queue.Empty:
+                except queue.Empty:
                     # nothing in the queue so continue
                     pass
                 else:
@@ -2699,7 +2697,7 @@ class ThreadedSource(threading.Thread):
                     if _package is None:
                         # we have a shutdown signal so return to exit
                         return
-        except Exception, e:
+        except Exception as e:
             # Some unknown exception occurred. This is probably a serious
             # problem. Exit with some notification.
             logcrit("rtgd", "Unexpected exception of type %s" % (type(e), ))
@@ -2942,7 +2940,7 @@ class WUSource(ThreadedSource):
                                                           max_tries=self.max_tries)
                     logdbg("rtgd",
                            "Downloaded updated Weather Underground forecast information")
-                except Exception, e:
+                except Exception as e:
                     # Some unknown exception occurred. Set _response to None,
                     # log it and continue.
                     _response = None
@@ -3182,11 +3180,11 @@ class WeatherUndergroundAPIForecast(object):
         for count in range(max_tries):
             # attempt the call
             try:
-                w = urllib2.urlopen(url)
+                w = urllib.request.urlopen(url)
                 _response = w.read()
                 w.close()
                 return _response
-            except (urllib2.URLError, socket.timeout), e:
+            except (urllib.error.URLError, socket.timeout) as e:
                 logerr("rtgd",
                        "Failed to get Weather Underground forecast on attempt %d" % (count+1, ))
                 logerr("weatherundergroundapiforecast", "   **** %s" % e)
@@ -3309,7 +3307,7 @@ class Zambretti(object):
             # if we made it this far the forecast extension is installed and we
             # can do business
             self.forecasting_installed = True
-        except Exception, e:
+        except Exception as e:
             # Something went wrong so log the error. Our forecasting_installed 
             # flag will not have been set so it is safe to continue but there 
             # will be no Zambretti text
@@ -3350,7 +3348,7 @@ class Zambretti(object):
                         # query and return the decoded forecast text
                         self.last_query_ts = now
                         return self.zambretti_label_dict[record[1]]
-                except Exception, e:
+                except Exception as e:
                     logerr('rtgd', 'get zambretti failed (attempt %d of %d): %s' %
                            ((count + 1), self.max_tries, e))
                     logdbg('rtgd', 'waiting %d seconds before retry' %
@@ -3496,7 +3494,7 @@ class DarkskySource(ThreadedSource):
                                                   max_tries=self.max_tries)
                     logdbg("rtgd",
                            "Downloaded updated Darksky forecast")
-                except Exception, e:
+                except Exception as e:
                     # Some unknown exception occurred. Set _response to None,
                     # log it and continue.
                     _response = None
@@ -3678,11 +3676,11 @@ class DarkskyForecastAPI(object):
         for count in range(max_tries):
             # attempt the call
             try:
-                w = urllib2.urlopen(url)
+                w = urllib.request.urlopen(url)
                 response = w.read()
                 w.close()
                 return response
-            except (urllib2.URLError, socket.timeout), e:
+            except (urllib.error.URLError, socket.timeout) as e:
                 logerr("darkskyapi",
                        "Failed to get API response on attempt %d" % (count+1, ))
                 logerr("darkskyapi", "   **** %s" % e)
@@ -3775,7 +3773,7 @@ class FileSource(ThreadedSource):
                     with open(self.scroller_file, 'r') as f:
                         _data = f.readline().strip()
                 logdbg("rtgd", "File read")
-            except Exception, e:
+            except Exception as e:
                 # Some unknown exception occurred. Set _data to None,
                 # log it and continue.
                 _data = None

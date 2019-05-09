@@ -1,4 +1,4 @@
-The Realtime gauge-data extension provides for near realtime updating of the
+The RealTime Gauge-Data extension provides for near realtime updating of the
 SteelSeries Weather Gauges by WeeWX. The extension consists of a WeeWX service
 that generates the file gauge-data.txt used to update the SteelSeries Weather
 Gauges.
@@ -6,7 +6,7 @@ Gauges.
 
 Pre-Requisites
 
-The Realtime gauge-data extension requires WeeWX v3.4.0 or greater.
+The RealTime Gauge-Data extension requires WeeWX v3.4.0 or greater.
 
 A number of fields have additional pre-requisites:
 
@@ -32,7 +32,7 @@ a directory that may be different from system to system. The following symbolic
 names are used below:
 
 -   $DOWNLOAD_ROOT. The path to the directory containing the downloaded
-    Realtime gauge-data extension.
+    RealTime Gauge-Data extension.
 
 -   $HTML_ROOT. The path to the directory where WeeWX generated reports are
     saved. This directory is normally set in the [StdReport] section of
@@ -52,28 +52,28 @@ names are used below:
     http://weewx.com/docs/usersguide.htm#Where_to_find_things for further
     information.
 
-1.  Download the latest Realtime gauge-data extension from the Realtime
+1.  Download the latest RealTime Gauge-Data extension from the Realtime
 gauge-data releases page (https://github.com/gjr80/weewx-realtime_gauge-data
 /releases) into a directory accessible from the WeeWX machine.
 
     $ wget -P $DOWNLOAD_ROOT https://github.com/gjr80/weewx-realtime_gauge-data
-/releases/download/v0.3.7/rtgd-0.3.7.tar.gz
+/releases/download/v0.4.0/rtgd-0.4.0.tar.gz
 
 	where $DOWNLOAD_ROOT is the path to the directory where the Realtime
     gauge-data extension is to be downloaded.
 
-2.  Install the Realtime gauge-data extension downloaded at step 1 using the
+2.  Install the RealTime Gauge-Data extension downloaded at step 1 using the
 wee_extension utility:
 
-    $ wee_extension --install=$DOWNLOAD_ROOT/rtgd-0.3.7.tar.gz
+    $ wee_extension --install=$DOWNLOAD_ROOT/rtgd-0.4.0.tar.gz
 
     This will result in output similar to the following:
 
-        Request to install '/var/tmp/rtgd-0.3.7.tar.gz'
-        Extracting from tar archive /var/tmp/rtgd-0.3.7.tar.gz
+        Request to install '/var/tmp/rtgd-0.4.0.tar.gz'
+        Extracting from tar archive /var/tmp/rtgd-0.4.0.tar.gz
         Saving installer file to /home/weewx/bin/user/installer/Rtgd
         Saved configuration dictionary. Backup copy at /home/weewx/weewx.conf.20190101124410
-        Finished installing extension '/var/tmp/rtgd-0.3.7.tar.gz'
+        Finished installing extension '/var/tmp/rtgd-0.4.0.tar.gz'
 
 3. Restart WeeWX:
 
@@ -91,24 +91,24 @@ This will result in the gauge-data.txt file being generated on receipt of each
 loop packet. A default installation will result in the generated gauge-data.txt
 file being placed in the $HTML_ROOT directory. The Realtime gauge-data
 extension installation can be further customized (eg file locations, frequency
-of generation etc) by referring to the Realtime gauge-data extension wiki.
+of generation etc) by referring to the RealTime Gauge-Data extension wiki.
 
 
 Manual installation
 
-1.  Download the latest Realtime gauge-data extension from the Realtime
+1.  Download the latest RealTime Gauge-Data extension from the Realtime
 gauge-data releases page (https://github.com/gjr80/weewx-realtime_gauge-data
 /releases) into a directory accessible from the WeeWX machine.
 
     $ wget -P $DOWNLOAD_ROOT https://github.com/gjr80/weewx-realtime_gauge-data
-/releases/download/v0.3.7/rtgd-0.3.7.tar.gz
+/releases/download/v0.4.0/rtgd-0.4.0.tar.gz
 
 	where $DOWNLOAD_ROOT is the path to the directory where the Realtime
     gauge-data extension is to be downloaded.
 
 2.  Unpack the extension as follows:
 
-    $ tar xvfz rtgd-0.3.7.tar.gz
+    $ tar xvfz rtgd-0.4.0.tar.gz
 
 3.  Copy files from within the resulting directory as follows:
 
@@ -148,4 +148,4 @@ This will result in the gauge-data.txt file being generated on receipt of each
 loop packet. A default installation will result in the generated gauge-data.txt
 file being placed in the $HTML_ROOT directory. The Realtime gauge-data
 extension installation can be further customized (eg file locations, frequency
-of generation etc) by referring to the Realtime gauge-data extension wiki.
+of generation etc) by referring to the RealTime Gauge-Data extension wiki.
