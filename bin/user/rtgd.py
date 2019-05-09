@@ -1241,8 +1241,7 @@ class RealtimeGaugeDataThread(threading.Thread):
                             # a serious problem. Exit.
                             logcrit("rtgdthread",
                                     "Unexpected exception of type %s" % (type(e), ))
-                            weeutil.weeutil.log_traceback('*** ',
-                                                          syslog.LOG_DEBUG)
+                            weeutil.weeutil.log_traceback('*** ')
                             logcrit("rtgdthread",
                                     "Thread exiting. Reason: %s" % (e, ))
                             return
@@ -2287,52 +2286,62 @@ class RtgdBuffer(object):
         # process outside temp
         out_temp = packet_d.get('outTemp', None)
         if out_temp is not None:
-            self.tempL_loop = [out_temp, ts] if (out_temp < self.tempL_loop[0] or self.tempL_loop[0] is None) else \
+            self.tempL_loop = [out_temp, ts] if (self.tempL_loop[0] is None or out_temp < self.tempL_loop[0]) else \
                 self.tempL_loop
-            self.tempH_loop = [out_temp, ts] if out_temp > self.tempH_loop[0] else self.tempH_loop
+            self.tempH_loop = [out_temp, ts] if (self.tempH_loop[0] is None or out_temp > self.tempH_loop[0]) else \
+                self.tempH_loop
 
         # process inside temp
         in_temp = packet_d.get('inTemp', None)
         if in_temp is not None:
-            self.intempL_loop = [in_temp, ts] if (in_temp < self.intempL_loop[0] or self.intempL_loop[0] is None) else \
+            self.intempL_loop = [in_temp, ts] if (self.intempL_loop[0] is None or in_temp < self.intempL_loop[0]) else \
                 self.intempL_loop
-            self.intempH_loop = [in_temp, ts] if in_temp > self.intempH_loop[0] else self.intempH_loop
+            self.intempH_loop = [in_temp, ts] if (self.intempH_loop[0] is None or in_temp > self.intempH_loop[0]) else \
+                self.intempH_loop
 
         # process dewpoint
         dewpoint = packet_d.get('dewpoint', None)
         if dewpoint is not None:
             self.dewpointL_loop = [dewpoint, ts] if \
-                (dewpoint < self.dewpointL_loop[0] or self.dewpointL_loop[0] is None) else \
+                self.dewpointL_loop[0] is None or (dewpoint < self.dewpointL_loop[0]) else \
                 self.dewpointL_loop
-            self.dewpointH_loop = [dewpoint, ts] if dewpoint > self.dewpointH_loop[0] else self.dewpointH_loop
+            self.dewpointH_loop = [dewpoint, ts] if \
+                (self.dewpointH_loop[0] is None or dewpoint > self.dewpointH_loop[0]) else \
+                self.dewpointH_loop
 
         # process appTemp
         app_temp = packet_d.get('appTemp', None)
         if app_temp is not None:
             self.apptempL_loop = [app_temp, ts] if \
-                (app_temp < self.apptempL_loop[0] or self.apptempL_loop[0] is None) else \
+                (self.apptempL_loop[0] is None or app_temp < self.apptempL_loop[0]) else \
                 self.apptempL_loop
-            self.apptempH_loop = [app_temp, ts] if app_temp > self.apptempH_loop[0] else self.apptempH_loop
+            self.apptempH_loop = [app_temp, ts] if \
+                (self.apptempH_loop[0] is None or app_temp > self.apptempH_loop[0]) else \
+                self.apptempH_loop
 
         # process windchill
         windchill = packet_d.get('windchill', None)
         if windchill is not None:
             self.wchillL_loop = [windchill, ts] if \
-                (windchill < self.wchillL_loop[0] or self.wchillL_loop[0] is None) else \
+                (self.wchillL_loop[0] is None or windchill < self.wchillL_loop[0]) else \
                 self.wchillL_loop
 
         # process heatindex
         heatindex = packet_d.get('heatindex', None)
         if heatindex is not None:
-            self.heatindexH_loop = [heatindex, ts] if heatindex > self.heatindexH_loop[0] else self.heatindexH_loop
+            self.heatindexH_loop = [heatindex, ts] if \
+                (self.heatindexH_loop[0] is None or heatindex > self.heatindexH_loop[0]) else \
+                self.heatindexH_loop
 
         # process barometer
         barometer = packet_d.get('barometer', None)
         if barometer is not None:
             self.pressL_loop = [barometer, ts] if \
-                (barometer < self.pressL_loop[0] or self.pressL_loop[0] is None) else \
+                (self.pressL_loop[0] is None or barometer < self.pressL_loop[0]) else \
                 self.pressL_loop
-            self.pressH_loop = [barometer, ts] if barometer > self.pressH_loop[0] else self.pressH_loop
+            self.pressH_loop = [barometer, ts] if \
+                (self.pressH_loop[0] is None or barometer > self.pressH_loop[0]) else \
+                self.pressH_loop
 
         # process rain
         rain = packet_d.get('rain', None)
@@ -2341,25 +2350,32 @@ class RtgdBuffer(object):
         # process rainRate
         rain_rate = packet_d.get('rainRate', None)
         if rain_rate is not None:
-            self.rrateH_loop = [rain_rate, ts] if rain_rate > self.rrateH_loop[0] else self.rrateH_loop
+            self.rrateH_loop = [rain_rate, ts] if \
+                (self.rrateH_loop[0] is None or rain_rate > self.rrateH_loop[0]) else \
+                self.rrateH_loop
 
         # process humidity
         out_humidity = packet_d.get('outHumidity', None)
         if out_humidity is not None:
             self.humL_loop = [out_humidity, ts] if \
-                (out_humidity < self.humL_loop[0] or self.humL_loop[0] is None) else \
+                (self.humL_loop[0] is None or out_humidity < self.humL_loop[0]) else \
                 self.humL_loop
-            self.humH_loop = [out_humidity, ts] if out_humidity > self.humH_loop[0] else self.humH_loop
+            self.humH_loop = [out_humidity, ts] if \
+                (self.humH_loop[0] is None or out_humidity > self.humH_loop[0]) else \
+                self.humH_loop
 
         # process UV
         uv = packet_d.get('UV', None)
         if uv is not None:
-            self.UVH_loop = [uv, ts] if uv > self.UVH_loop[0] else self.UVH_loop
+            self.UVH_loop = [uv, ts] if (self.UVH_loop[0] is None or uv > self.UVH_loop[0]) else \
+                self.UVH_loop
 
         # process radiation
         radiation = packet_d.get('radiation', None)
         if radiation is not None:
-            self.SolarH_loop = [radiation, ts] if radiation > self.SolarH_loop[0] else self.SolarH_loop
+            self.SolarH_loop = [radiation, ts] if \
+                (self.SolarH_loop[0] is None or radiation > self.SolarH_loop[0]) else \
+                self.SolarH_loop
 
         # process windSpeed/windDir
         # if windDir exists then get it, if it does not exist get None
@@ -2372,7 +2388,7 @@ class RtgdBuffer(object):
         self.windcount += 1
         # Have we seen a new high gust? If so update self.wgustM_loop but only
         # if we have a corresponding wind direction
-        if wind_speed > self.wgustM_loop[0] and wind_dir is not None:
+        if (self.wgustM_loop[0] is None or wind_speed > self.wgustM_loop[0]) and wind_dir is not None:
             self.wgustM_loop = [wind_speed, wind_dir, ts]
         # average wind speed
         self.wind_list.append([wind_speed, ts])
@@ -2386,7 +2402,9 @@ class RtgdBuffer(object):
         wind_m_loop = self.average_wind()
         # have we seen a new high (archive_interval) avg wind? if so update
         # self.windM_loop
-        self.windM_loop = [wind_m_loop, ts] if wind_m_loop > self.windM_loop[0] else self.windM_loop
+        self.windM_loop = [wind_m_loop, ts] if \
+            (self.windM_loop[0] is None or wind_m_loop > self.windM_loop[0]) else \
+            self.windM_loop
         # Update the 10 minute wind direction list, but only if windDir is not
         # None
         if wind_dir is not None:
@@ -3181,9 +3199,19 @@ class WeatherUndergroundAPIForecast(object):
             # attempt the call
             try:
                 w = urllib.request.urlopen(url)
-                _response = w.read()
+                # Get charset used so we can decode the stream correctly.
+                # Unfortunately the way to get the charset depends on whether
+                # we are running under python2 or python3. Assume python3 but be
+                # prepared to catch the error if python2.
+                try:
+                    char_set = w.headers.get_content_charset()
+                except AttributeError:
+                    # must be python2
+                    char_set = w.headers.getparam('charset')
+                # now get the response decoding it appropriately
+                response = w.read().decode(char_set)
                 w.close()
-                return _response
+                return response
             except (urllib.error.URLError, socket.timeout) as e:
                 logerr("rtgd",
                        "Failed to get Weather Underground forecast on attempt %d" % (count+1, ))
@@ -3315,8 +3343,7 @@ class Zambretti(object):
                    'Error initialising Zambretti forecast, is the forecast extension installed.')
             logdbg('rtgd',
                    'Unexpected exception of type %s' % (type(e), ))
-            weeutil.weeutil.log_traceback('rtgd: **** ',
-                                          loglevel=syslog.LOG_DEBUG)
+            weeutil.weeutil.log_traceback('rtgd: **** ')
 
     def get_data(self):
         """Get scroller user specified scroller text string.
@@ -3545,7 +3572,7 @@ class DarkskySource(ThreadedSource):
             # we have our block, but is the summary there
             if 'summary' in response[self.block]:
                 # we have a summary field
-                summary = response[self.block]['summary'].encode('ascii', 'ignore')
+                summary = response[self.block]['summary']
                 return summary
             else:
                 # we have no summary field, so log it and return None
@@ -3677,7 +3704,17 @@ class DarkskyForecastAPI(object):
             # attempt the call
             try:
                 w = urllib.request.urlopen(url)
-                response = w.read()
+                # Get charset used so we can decode the stream correctly.
+                # Unfortunately the way to get the charset depends on whether
+                # we are running under python2 or python3. Assume python3 but be
+                # prepared to catch the error if python2.
+                try:
+                    char_set = w.headers.get_content_charset()
+                except AttributeError:
+                    # must be python2
+                    char_set = w.headers.getparam('charset')
+                # now get the response decoding it appropriately
+                response = w.read().decode(char_set)
                 w.close()
                 return response
             except (urllib.error.URLError, socket.timeout) as e:
